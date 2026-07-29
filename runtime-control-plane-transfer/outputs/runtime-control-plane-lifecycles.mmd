@@ -1,0 +1,135 @@
+stateDiagram-v2
+  direction LR
+
+  state "Task lifecycle\n(persisted state)" as TASK {
+    [*] --> task_draft
+    state "draft" as task_draft
+    state "ready" as task_ready
+    state "running" as task_running
+    state "handoff_pending" as task_handoff
+    state "awaiting_approval" as task_approval
+    state "blocked" as task_blocked
+    state "verifying" as task_verifying
+    state "completed" as task_completed
+    state "failed" as task_failed
+    state "cancelled" as task_cancelled
+
+    task_draft --> task_ready: define objective
+    task_ready --> task_running: start with active lease
+    task_running --> task_handoff: propose handoff
+    task_handoff --> task_running: accept or reject
+    task_running --> task_approval: approval requested
+    task_approval --> task_running: allowed
+    task_approval --> task_blocked: denied or expired
+    task_running --> task_blocked: cannot progress
+    task_blocked --> task_running: resolved
+    task_running --> task_verifying: execution finished
+    task_verifying --> task_running: verification failed, retry allowed
+    task_verifying --> task_completed: success criteria pass
+    task_ready --> task_failed
+    task_running --> task_failed
+    task_blocked --> task_failed
+    task_verifying --> task_failed
+    task_ready --> task_cancelled
+    task_running --> task_cancelled
+    task_blocked --> task_cancelled
+    task_verifying --> task_cancelled
+    task_completed --> [*]
+    task_failed --> [*]
+    task_cancelled --> [*]
+  }
+
+  state "Run lifecycle" as RUN {
+    [*] --> run_created
+    state "created" as run_created
+    state "starting" as run_starting
+    state "active" as run_active
+    state "paused" as run_paused
+    state "blocked" as run_blocked
+    state "checkpointed" as run_checkpointed
+    state "degraded" as run_degraded
+    state "ambiguous" as run_ambiguous
+    state "completed" as run_completed
+    state "failed" as run_failed
+    state "cancelled" as run_cancelled
+
+    run_created --> run_starting
+    run_starting --> run_active: runtime acknowledged
+    run_starting --> run_degraded: observation gap
+    run_starting --> run_ambiguous: dispatch outcome unknown
+    run_active --> run_paused: pause acknowledged
+    run_paused --> run_active: resume
+    run_active --> run_blocked: external dependency
+    run_blocked --> run_active: dependency resolved
+    run_active --> run_checkpointed: checkpoint valid
+    run_checkpointed --> run_active: continue
+    run_active --> run_degraded: evidence incomplete
+    run_blocked --> run_degraded: evidence incomplete
+    run_degraded --> run_active: reconciled
+    run_degraded --> run_ambiguous: mutation outcome unknown
+    run_ambiguous --> run_active: human or native reconciliation
+    run_active --> run_completed
+    run_active --> run_failed
+    run_active --> run_cancelled
+    run_degraded --> run_failed
+    run_degraded --> run_cancelled
+    run_ambiguous --> run_failed
+    run_ambiguous --> run_cancelled
+    run_completed --> [*]
+    run_failed --> [*]
+    run_cancelled --> [*]
+  }
+
+  state "Handoff lifecycle" as HANDOFF {
+    [*] --> handoff_proposed
+    state "proposed" as handoff_proposed
+    state "validating" as handoff_validating
+    state "accepted" as handoff_accepted
+    state "rejected" as handoff_rejected
+    state "expired" as handoff_expired
+    state "cancelled" as handoff_cancelled
+
+    handoff_proposed --> handoff_validating: receiver begins validation
+    handoff_proposed --> handoff_cancelled: sender cancels
+    handoff_proposed --> handoff_expired: deadline
+    handoff_validating --> handoff_accepted: atomic ownership commit
+    handoff_validating --> handoff_rejected: validation fails
+    handoff_validating --> handoff_expired: deadline
+    handoff_validating --> handoff_cancelled: authorized cancellation
+    handoff_accepted --> [*]
+    handoff_rejected --> [*]
+    handoff_expired --> [*]
+    handoff_cancelled --> [*]
+  }
+
+  state "Lease lifecycle\n(Task leased = derived view)" as LEASE {
+    [*] --> lease_available
+    state "available" as lease_available
+    state "held" as lease_held
+    state "renewing" as lease_renewing
+    state "released" as lease_released
+    state "expired" as lease_expired
+    state "fenced" as lease_fenced
+
+    lease_available --> lease_held: acquire + fencing token
+    lease_held --> lease_renewing: renewal started
+    lease_renewing --> lease_held: renewal committed
+    lease_held --> lease_released: owner releases
+    lease_renewing --> lease_expired: deadline missed
+    lease_held --> lease_expired: TTL elapsed
+    lease_expired --> lease_fenced: reject old token
+    lease_released --> [*]
+    lease_fenced --> [*]
+  }
+
+  note right of TASK
+    "leased" is not persisted on Task.
+    It is derived when the active Lease
+    is held or renewing.
+  end note
+
+  note right of RUN
+    degraded: evidence or observation incomplete
+    ambiguous: a mutation outcome is unknown
+    Neither state permits automatic retry.
+  end note

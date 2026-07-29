@@ -1,0 +1,64 @@
+graph TD
+    H["L0 · Operators<br/>Humans · Supervisor Agents · External APIs"]
+
+    subgraph CP["Runtime Control Plane · Our Product"]
+        direction TB
+        P1["P1 · Collaboration Surface<br/>Task Graph · Run View · Steering · Review"]
+        P2["P2 · Governance Plane<br/>Identity · Roles · Policy · Approval · Budget · Audit"]
+        P3["P3 · Coordination Plane<br/>Actor Registry · Endpoint Registry · Scheduler · Handoff · Review"]
+        P4["P4 · Execution Semantics<br/>Continue · Replan · Fork · Handoff · Review · Pause · Cancel"]
+        P5["P5 · Shared State Plane<br/>Task · Run · Decision · Constraint · Checkpoint · Artifact"]
+        P6["P6 · Runtime Integration<br/>Adapter SDK · Registry · Capability Contract · Event Normalization"]
+        P1 --> P3
+        P2 --> P3
+        P3 --> P4
+        P4 --> P5
+        P4 --> P6
+        P6 -.->|"normalized state"| P5
+    end
+
+    subgraph AM["Adapter Mesh · Dynamically Registered"]
+        direction TB
+        M["Adapter Manifest + Conformance<br/>Namespaced IDs · Contract Range · Provenance · Signature"]
+        A1["Adapter Instance A<br/>Vendor Protocol / SDK"]
+        A2["Adapter Instance B<br/>Vendored Open Source"]
+        AN["Adapter Instance N<br/>CLI / Artifact-only / Future Protocol"]
+        M --> A1
+        M --> A2
+        M --> AN
+    end
+
+    subgraph RH["Runtime Endpoints · Unbounded Types and Vendors"]
+        direction LR
+        R1["Runtime Endpoint A<br/>Closed or Open · Local or Hosted"]
+        R2["Runtime Endpoint B<br/>Closed or Open · Local or Hosted"]
+        RN["Runtime Endpoint N<br/>New Vendor / Community / Self-hosted"]
+    end
+
+    subgraph EA["Execution and Evidence"]
+        E["Execution Environments<br/>Repos · Worktrees · Cloud VMs · External Systems"]
+        R["Artifact and Evidence Graph<br/>Code · PR · Docs · Tests · Logs"]
+        E --> R
+    end
+
+    H --> P1
+    H --> P2
+    P6 <-->|"commands · events · capabilities"| M
+    A1 <--> R1
+    A2 <--> R2
+    AN <--> RN
+    R1 --> E
+    R2 --> E
+    RN --> E
+
+    classDef actor fill:#e8f5e9,stroke:#2e7d32,color:#17351a,stroke-width:1.5px
+    classDef product fill:#e3f2fd,stroke:#1565c0,color:#0d2a4a,stroke-width:1.5px
+    classDef adapter fill:#fff8e1,stroke:#ef6c00,color:#4a2700,stroke-width:1.5px
+    classDef runtime fill:#f3e5f5,stroke:#7b1fa2,color:#32113d,stroke-width:1.5px
+    classDef evidence fill:#f5f5f5,stroke:#455a64,color:#263238,stroke-width:1.5px
+
+    class H actor
+    class P1,P2,P3,P4,P5,P6 product
+    class M,A1,A2,AN adapter
+    class R1,R2,RN runtime
+    class E,R evidence

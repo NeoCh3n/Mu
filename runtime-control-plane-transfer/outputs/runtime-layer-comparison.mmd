@@ -1,0 +1,42 @@
+graph LR
+    subgraph CX["Codex · 5 logical layers"]
+        direction TB
+        C1["C1 · Surfaces<br/>Web · macOS · CLI/TUI · IDE · Mobile"]
+        C2["C2 · App Server Protocol<br/>Bidirectional JSON-RPC · Approvals · Events"]
+        C3["C3 · Session Model<br/>Thread · Turn · Item · Persistence"]
+        C4["C4 · Codex Core<br/>Agent Loop · Thread Manager · Model Interaction"]
+        C5["C5 · Execution and Extensions<br/>Tools · Sandbox · MCP · Skills · Auth"]
+        C1 --> C2 --> C3 --> C4 --> C5
+    end
+
+    subgraph CP["Our Product · 6 layers"]
+        direction TB
+        P12["P1–P2 · Experience and Governance<br/>Collaboration UI · Identity · Policy · Approval · Audit"]
+        P34["P3–P4 · Coordination and Semantics<br/>Task Graph · Handoff · Continue · Replan · Fork · Pause · Cancel"]
+        P56["P5–P6 · Shared State and Integration<br/>Execution Ledger · Adapters · Capability Contract · Drift Probe"]
+        P12 --> P34 --> P56
+    end
+
+    subgraph CL["Claude Code · 5 logical layers"]
+        direction TB
+        A1["A1 · Surfaces<br/>Terminal · IDE · Desktop · Web · Mobile · Remote Control"]
+        A2["A2 · Harness and Agent SDK<br/>Sessions · Agent Loop · Programmatic Control"]
+        A3["A3 · Native Orchestration<br/>Subagents · Agent View · Agent Teams"]
+        A4["A4 · Extension and Control<br/>Tools · Permissions · Hooks · MCP · Skills · Plugins"]
+        A5["A5 · Execution Substrate<br/>Local Filesystem · Shell · Worktrees · Cloud"]
+        A1 --> A2 --> A3 --> A4 --> A5
+    end
+
+    P56 <-->|"Codex adapter"| C2
+    P56 <-->|"Claude execution adapter"| A2
+    P56 <-->|"Claude hooks adapter"| A4
+    C5 -.->|"native evidence"| C2
+    A5 -.->|"native evidence"| A4
+
+    classDef codex fill:#fff8e1,stroke:#ef6c00,color:#4a2700,stroke-width:1.5px
+    classDef product fill:#e3f2fd,stroke:#1565c0,color:#0d2a4a,stroke-width:1.5px
+    classDef claude fill:#f3e5f5,stroke:#7b1fa2,color:#32113d,stroke-width:1.5px
+
+    class C1,C2,C3,C4,C5 codex
+    class P12,P34,P56 product
+    class A1,A2,A3,A4,A5 claude

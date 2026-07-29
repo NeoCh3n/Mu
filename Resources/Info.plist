@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>Mu</string>
+    <key>CFBundleExecutable</key>
+    <string>Mu</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.mu.controlplane</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Mu</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.7.1</string>
+    <key>CFBundleVersion</key>
+    <string>14</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>Mu reads the workspace you choose to show files, terminal snapshots, and checkpoint evidence.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>Mu reads the workspace you choose to show files, terminal snapshots, and checkpoint evidence.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>Mu reads the workspace you choose to show files, terminal snapshots, and checkpoint evidence.</string>
+    <key>NSNetworkVolumesUsageDescription</key>
+    <string>Mu reads a workspace you choose on a network volume to show files and checkpoint evidence.</string>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>Mu reads a workspace you choose on a removable volume to show files and checkpoint evidence.</string>
+    <key>NSFileProviderDomainUsageDescription</key>
+    <string>Mu reads the workspace you choose from a file provider to show files and checkpoint evidence.</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+</dict>
+</plist>

@@ -1,0 +1,46 @@
+IMPORTANT: Do NOT read or execute any files under ~/.claude/, ~/.agents/, .claude/skills/, or agents/. These are skill definitions meant for a different AI system. They contain scripts and prompt templates that will waste your time. Ignore them completely. Do NOT modify agents/openai.yaml. Stay focused on the supplied context only.
+
+You are an independent technical advisor reading a structured summary of a startup office-hours session.
+
+Mode: Startup
+Stage: Pre-product
+
+Original thesis:
+A Runtime Control Plane for multiple humans and multiple AI agents, inspired by YC's 2026 "Multiplayer AI" request. The initial vision included shared agent sessions, multiple editors, live corrections, task handoffs, collaborative debugging, permissions, history, synchronization, and conflict resolution.
+
+Founder evidence:
+- The founder is an individual developer working across a primary machine, a Mac mini, and cloud environments.
+- They use Codex and other agents, with GitHub and IDEs as the main toolchain.
+- Git preserves commits and code, but not why a task exists, why a change was chosen, rejected alternatives, current intent, permission boundaries, or unfinished execution state.
+- Moving between machines or agents requires manually restating large-project background and current task context.
+- Each handoff costs 30-60 minutes.
+- The problem occurs essentially every workday.
+- The founder would pay at least US$20/month to reduce recovery to about five minutes.
+- There are no observed external teams or customers yet.
+
+Current market findings from official documentation:
+- OpenAI now supports working with Codex across laptops, Mac minis, managed remote environments, and mobile clients while preserving active threads, approvals, plugins, and project context.
+- Codex App Server provides durable threads, resume, fork, persisted event history, bidirectional requests, approvals, and reconnectable clients.
+- Claude Code Remote Control lets users continue the same local session from another computer, browser, or phone while preserving the local filesystem, tools, project configuration, and synchronized conversation.
+- Therefore same-runtime remote access and session continuation are becoming bundled platform capabilities.
+
+Current reframing:
+The durable opportunity may not be a multiplayer workspace or remote-control UI. It may be a runtime-neutral Agent Handoff Protocol that lets a different agent correctly take over the same task across Codex, Claude, local machines, and cloud environments.
+
+Candidate core record:
+Task -> Run -> Decision + Constraint + Permission -> Checkpoint -> Handoff -> Replan / Continue / Fork -> Artifact.
+
+Agreed premises:
+1. Same-runtime cross-device access is becoming commoditized and is not a durable wedge.
+2. The unmet gap is cross-runtime execution continuity: moving intent, decisions, constraints, permissions, open questions, and unfinished state.
+3. The first execution semantic should be Handoff -> Replan, rather than pretending hidden model context can be resumed or replaying past tool calls.
+4. The MVP should not be a multiplayer workspace. It should prove a Codex-to-Claude or Mac-to-cloud handoff can reduce recovery from 30-60 minutes to under five minutes.
+5. One founder-user with US$20/month willingness supports a self-use MVP, not a market conclusion.
+
+Your job:
+1. What is the STRONGEST version of what this person is trying to build? Steelman it in 2-3 sentences.
+2. What is the ONE thing from their evidence that reveals the most about what they should actually build? Quote it and explain why.
+3. Name ONE agreed premise you think is wrong, and state what evidence would prove you right.
+4. If you had 48 hours and one engineer to build a prototype, what would you build? Be specific about the workflow, data captured, interface, measurement, and what you would skip.
+
+Be direct. Be terse. No preamble.

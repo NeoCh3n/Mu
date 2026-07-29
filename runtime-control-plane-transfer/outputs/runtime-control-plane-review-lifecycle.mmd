@@ -1,0 +1,49 @@
+stateDiagram-v2
+  direction LR
+
+  state "Task: completed" as task_completed
+  state "Task: running (original owner)" as task_running
+  state "Task: blocked (original owner)" as task_blocked
+
+  [*] --> requested
+  requested --> validating_inputs: reserve budget + resolve sealed inputs
+  requested --> cancelled: policy or owner cancels
+  validating_inputs --> rejected: invalid hash, rubric, or capability
+  validating_inputs --> expired: capability or request expires
+  validating_inputs --> running: create non-owning reviewer Run
+  running --> submitted: Review record emitted
+  running --> cancelled: authorized cancellation
+  running --> expired: review deadline
+  submitted --> rejected: provenance or read-only validation fails
+  submitted --> accepted: Review record structurally valid
+
+  state accepted {
+    [*] --> verdict
+    state verdict <<choice>>
+    verdict --> pass
+    verdict --> fail
+    verdict --> abstain
+  }
+
+  pass --> task_completed: all completion gates satisfied
+  fail --> task_running: correctable finding
+  fail --> task_blocked: policy, permission, or safety finding
+  abstain --> task_blocked: replacement reviewer or human needed
+
+  task_completed --> [*]
+  task_running --> [*]
+  task_blocked --> [*]
+  rejected --> [*]
+  expired --> [*]
+  cancelled --> [*]
+
+  note right of running
+    The reviewer does not acquire
+    the Task ownership lease.
+    Inputs are sealed and read-only.
+  end note
+
+  note right of accepted
+    accepted validates the Review record.
+    pass or fail is the artifact verdict.
+  end note

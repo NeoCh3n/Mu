@@ -1,0 +1,2 @@
+Mu workbench acceptance fixture.
+Identity and runtime must remain distinct.
