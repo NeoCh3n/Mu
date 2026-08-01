@@ -165,6 +165,15 @@ function writeValue(value: unknown, fmt: NumberWriter, out: string[]): void {
     out.push(escapeString(value))
   } else if (value instanceof Date) {
     out.push(escapeString(formatIso8601Date(value)))
+  } else if (value instanceof Set) {
+    // Swift encodes Set as an array; use a deterministic sorted order.
+    const items = [...value].sort((a, b) => String(a) < String(b) ? -1 : 1)
+    out.push('[')
+    for (let i = 0; i < items.length; i++) {
+      if (i > 0) out.push(',')
+      writeValue(items[i], fmt, out)
+    }
+    out.push(']')
   } else if (Array.isArray(value)) {
     out.push('[')
     for (let i = 0; i < value.length; i++) {
