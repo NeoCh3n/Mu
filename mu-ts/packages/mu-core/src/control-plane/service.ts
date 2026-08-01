@@ -10,6 +10,8 @@ import {
   stableConflictID,
 } from '../context-kernel/index.ts'
 import type { Harness, HarnessTurnEvent, HarnessTurnInput } from '../harness/types.ts'
+import { toAgentHostAdapter } from '../host-adapter/harness-adapter.ts'
+import type { AgentHostAdapter } from '../host-adapter/types.ts'
 import {
   createAgentIdentity,
   createChatEntry,
@@ -101,6 +103,8 @@ export interface ControlPlaneDependencies {
   readonly store: SQLiteStore
   /** One harness per deployment (local mode or QM mode). */
   readonly harness: Harness
+  /** Optional explicit host adapter; defaults to toAgentHostAdapter(harness). */
+  readonly host?: AgentHostAdapter
   readonly now?: () => Date
   /** Observer for externally-visible events (e.g. server SSE in Phase 6). */
   readonly onEvent?: (event: ControlPlaneTurnEvent) => void
@@ -237,6 +241,8 @@ type ContextConflictRecordLike = ReturnType<typeof createContextConflictRecord>
 export function createControlPlaneService(deps: ControlPlaneDependencies): ControlPlaneService {
   const store = deps.store
   const harness = deps.harness
+  /** The control plane speaks only the AgentHostAdapter contract. */
+  const host = deps.host ?? toAgentHostAdapter(harness)
   const now = deps.now ?? (() => new Date())
   const onEvent = deps.onEvent
 
@@ -344,15 +350,15 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
           adapterID: `mu.${endpoint.runtimeTypeID}`,
           provider: providerFor(endpoint),
           connectionKind: 'managed_runtime',
-          controlMode: harness.capabilities.controlMode,
+          controlMode: host.capabilities.controlMode,
           trustLevel: 'managed',
-          observationFidelity: harness.capabilities.observationFidelity,
+          observationFidelity: host.capabilities.observationFidelity,
           operations: [
             { operation: 'session.create', support: 'supported' },
             { operation: 'input.submit', support: 'supported' },
-            { operation: 'events.observe', support: harness.capabilities.supportsEventStream ? 'supported' : 'unsupported' },
-            { operation: 'interrupt', support: harness.capabilities.supportsInterrupt ? 'supported' : 'unsupported' },
-            { operation: 'artifact.list', support: harness.capabilities.supportsArtifacts ? 'supported' : 'unsupported' },
+            { operation: 'events.observe', support: host.capabilities.supportsEventStream ? 'supported' : 'unsupported' },
+            { operation: 'interrupt', support: host.capabilities.supportsInterrupt ? 'supported' : 'unsupported' },
+            { operation: 'artifact.list', support: host.capabilities.supportsArtifacts ? 'supported' : 'unsupported' },
           ],
           instanceIdentity: {
             provider: providerFor(endpoint),
@@ -487,7 +493,7 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
           nativeSessionID: '',
           nativeAgentName: agent?.displayName ?? endpoint.displayName,
           workspacePath: task.repositoryPath,
-          connectionMode: harness.capabilities.mode,
+          connectionMode: host.capabilities.mode,
           state: 'connecting',
           createdAt: nowT,
           updatedAt: nowT,
@@ -596,7 +602,7 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
       let sessionID = ''
       let terminalEvent: HarnessTurnEvent | undefined
 
-      for await (const event of harness.runTurn(input)) {
+      for await (const event of host.submit(input)) {
         switch (event.kind) {
           case 'session_started':
             sessionID = event.sessionID
@@ -663,7 +669,7 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
       const nowT = now()
 
       if (sessionID !== '') {
-        const artifacts = await harness.listArtifacts(sessionID)
+        const artifacts = await host.listArtifacts(sessionID)
         for (const artifact of artifacts) {
           upsertRuntimeArtifact(
             store,
@@ -785,7 +791,7 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
       if (run.state === 'completed' || run.state === 'failed' || run.state === 'cancelled') {
         throw MuError.invalidTransition(`Run ${runID} is already terminal (${run.state}).`)
       }
-      await harness.interrupt(run.nativeThreadID ?? run.id)
+      await host.interrupt(run.nativeThreadID ?? run.id)
       const updated: RunRecord = { ...run, state: 'cancelled', updatedAt: now() }
       upsertRun(store, updated)
       appendLedger(store, {
@@ -1144,7 +1150,7 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
     async probeEndpoints() {
       const outcomes: ProbeOutcome[] = []
       for (const endpoint of fetchEndpoints(store)) {
-        const result = await harness.probe()
+        const result = await host.probe()
         const probedAt = now()
         const updated: RuntimeEndpoint = {
           ...endpoint,
