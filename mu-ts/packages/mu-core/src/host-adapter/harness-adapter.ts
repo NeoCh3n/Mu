@@ -57,6 +57,9 @@ export function toAgentHostAdapter(
     interrupt: (sessionID) => harness.interrupt(sessionID),
     ...(options.resolveApproval !== undefined ? { resolveApproval: options.resolveApproval } : {}),
     listArtifacts: (sessionID) => harness.listArtifacts(sessionID),
+    ...(typeof harness.discoverHistory === 'function'
+      ? { discoverHistory: (workspacePath: string) => harness.discoverHistory!(workspacePath) }
+      : {}),
     ...('stop' in harness && typeof harness.stop === 'function'
       ? { stop: () => (harness as Harness & { stop: () => void }).stop() }
       : {}),

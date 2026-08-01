@@ -71,6 +71,9 @@ function fakeCodexClient(overrides: Partial<CodexClientLike> = {}): CodexClientL
     async probe() {
       return { userAgent: 'codex-app-server/0.1.0', platformOS: 'darwin', signedIn: true, observedThreadCount: 0 }
     },
+    async listHistory() {
+      return []
+    },
     async runReadOnlyTask(params) {
       params.onThreadStarted?.('thread-1')
       params.onTurnStarted?.('thread-1', 'turn-1')

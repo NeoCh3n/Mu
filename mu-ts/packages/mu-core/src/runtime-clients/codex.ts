@@ -663,6 +663,11 @@ export class CodexAppServerClient {
         archived: isArchived,
         cwd: canonicalWorkspacePathValue,
         sourceKinds: ['cli', 'vscode', 'exec', 'appServer'],
+        // Deliberately NO useStateDbOnly here: codex ≥0.146 keeps current-
+        // session threads in process storage, not the state DB. History
+        // queries must run in the same app-server process that ran the
+        // turns (see LocalChildProcessHarness.discoverHistory), and the
+        // default store exposes exactly those threads.
       }
       if (cursor !== undefined) params['cursor'] = cursor
       const response = await this.request('thread/list', params, timeoutMs)

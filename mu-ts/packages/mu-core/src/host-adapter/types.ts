@@ -1,3 +1,4 @@
+import type { ExternalConversationCandidate } from '../conversation-history.ts'
 import type { HarnessCapabilities } from '../harness/types.ts'
 import type {
   HarnessArtifactRecord,
@@ -34,6 +35,7 @@ export type { HarnessTurnResult as HostTurnResult }
 export type { HarnessProbeResult as HostProbeResult }
 export type { HarnessArtifactRecord as HostArtifactRecord }
 export type { HarnessPendingApproval as HostApprovalRequest }
+export type { ExternalConversationCandidate as HostHistoryCandidate }
 
 /** How this host participates in approval flows. */
 export const HostApprovalSupport = {
@@ -59,6 +61,53 @@ export interface HostApprovalResolution {
   readonly decision: 'granted' | 'denied'
 }
 
+// ---------------------------------------------------------------------------
+// Host error classification. Hosts throw host-specific errors; the control
+// plane and server map them onto MuError kinds via classifyHostError.
+// ---------------------------------------------------------------------------
+
+export const HostErrorKind = {
+  /** Host executable missing or unusable. */
+  unavailable: 'unavailable',
+  /** Signature/auth rejection, not logged in. */
+  authentication: 'authentication',
+  /** Network/transport failure (QM bridge, remote hosts). */
+  network: 'network',
+  /** The host rejected the request or the command failed. */
+  refused: 'refused',
+  /** Timeout waiting for a host response. */
+  timeout: 'timeout',
+  /** Invalid input / protocol violation by Mu. */
+  protocol: 'protocol',
+  /** Anything else. */
+  unknown: 'unknown',
+} as const
+export type HostErrorKind = (typeof HostErrorKind)[keyof typeof HostErrorKind]
+
+export function classifyHostError(error: unknown): HostErrorKind {
+  const message = error instanceof Error ? error.message : String(error)
+  const lower = message.toLowerCase()
+  if (message.includes('is unavailable') || message.includes('not configured') || message.includes('executable is unavailable')) {
+    return HostErrorKind.unavailable
+  }
+  if (lower.includes('unauthorized') || lower.includes('rejected the source signature') || lower.includes('not logged in')) {
+    return HostErrorKind.authentication
+  }
+  if (lower.includes('network') || lower.includes('unreachable') || lower.includes('failed to fetch') || lower.includes('econnrefused')) {
+    return HostErrorKind.network
+  }
+  if (lower.includes('refused') || lower.includes('security quarantine')) {
+    return HostErrorKind.refused
+  }
+  if (lower.includes('timed out') || lower.includes('timeout')) {
+    return HostErrorKind.timeout
+  }
+  if (lower.includes('invalid transition') || lower.includes('requires')) {
+    return HostErrorKind.protocol
+  }
+  return HostErrorKind.unknown
+}
+
 export interface AgentHostAdapter {
   /** Stable host identifier, e.g. 'claude-code.cli', 'codex.app-server', 'qm.bridge'. */
   readonly hostID: string
@@ -75,6 +124,12 @@ export interface AgentHostAdapter {
   /** Forwards an approval decision to the host when resolveForward is set. */
   resolveApproval?(resolution: HostApprovalResolution): Promise<void>
   listArtifacts(sessionID: string): Promise<HarnessArtifactRecord[]>
+  /**
+   * Discovers past conversations for a workspace. Host-internal visibility:
+   * the same host process that ran the turns must be queried (Codex threads
+   * are process-scoped). Optional — hosts without history omit it.
+   */
+  discoverHistory?(workspacePath: string): Promise<ExternalConversationCandidate[]>
   /** Stops long-lived host processes (codex app-server, SSE streams). */
   stop?(): void
 }

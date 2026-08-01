@@ -1,5 +1,6 @@
 import type { TaskRecord } from '../models.ts'
 import type { ProjectContextPackRecord } from '../project-kernel/index.ts'
+import type { ExternalConversationCandidate } from '../conversation-history.ts'
 import type { ConversationProvider } from '../types.ts'
 import type { RuntimeControlMode, RuntimeObservationFidelity } from '../runtime-gateway/manifest.ts'
 
@@ -147,4 +148,10 @@ export interface Harness {
   interrupt(sessionID: string): Promise<void>
   probe(): Promise<HarnessProbeResult>
   listArtifacts(sessionID: string): Promise<HarnessArtifactRecord[]>
+  /**
+   * Discovers past conversations for a workspace (host-internal visibility:
+   * Codex threads are only visible to the app-server process that created
+   * them). Optional — hosts without history support omit it.
+   */
+  discoverHistory?(workspacePath: string): Promise<ExternalConversationCandidate[]>
 }

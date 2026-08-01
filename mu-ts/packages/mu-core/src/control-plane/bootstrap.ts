@@ -86,7 +86,9 @@ export function bootstrapLocalControlPlane(
     summary: 'Reviews work and approves changes.',
   })
 
-  // Endpoints from discovered executables.
+  // Endpoints from discovered executables, each carrying its real instance
+  // identity (executable path, surface kind, stable key) so the UI can show
+  // Codex Desktop vs Codex CLI vs a specific Claude Code terminal.
   const endpointIDs: Record<string, string> = {}
   if (claudeExe !== undefined) {
     const endpoint = service.registerEndpoint({
@@ -94,15 +96,33 @@ export function bootstrapLocalControlPlane(
       displayName: 'Claude Code (local)',
       runtimeVersion: 'local',
       location: 'local',
+      instanceIdentity: {
+        provider: { rawValue: 'claude_code' },
+        surfaceKind: 'terminal_cli',
+        identityBasis: 'installation',
+        stableInstanceKey: `claude-code.cli:${claudeExe}`,
+        instanceLabel: 'Claude Code CLI',
+        executablePath: claudeExe,
+        terminalIdentifier: 'terminal-1',
+      },
     })
     endpointIDs.claudeCode = endpoint.id
   }
   if (codexExe !== undefined) {
+    const desktop = codexExe.toLowerCase().includes('.app/contents/')
     const endpoint = service.registerEndpoint({
       runtimeTypeID: 'openai.codex/app-server',
-      displayName: 'Codex (local)',
+      displayName: desktop ? 'Codex (Desktop)' : 'Codex (local)',
       runtimeVersion: 'local',
       location: 'local',
+      instanceIdentity: {
+        provider: { rawValue: 'codex' },
+        surfaceKind: desktop ? 'desktop_application' : 'terminal_cli',
+        identityBasis: 'installation',
+        stableInstanceKey: `codex.app-server:${codexExe}`,
+        instanceLabel: desktop ? 'Codex Desktop' : 'Codex CLI',
+        executablePath: codexExe,
+      },
     })
     endpointIDs.codex = endpoint.id
   }

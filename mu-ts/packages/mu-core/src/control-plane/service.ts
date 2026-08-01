@@ -10,8 +10,9 @@ import {
   stableConflictID,
 } from '../context-kernel/index.ts'
 import type { Harness, HarnessTurnEvent, HarnessTurnInput } from '../harness/types.ts'
+import type { AgentRuntimeInstanceIdentity } from '../types.ts'
 import { toAgentHostAdapter } from '../host-adapter/harness-adapter.ts'
-import type { AgentHostAdapter } from '../host-adapter/types.ts'
+import type { AgentHostAdapter, HostHistoryCandidate } from '../host-adapter/types.ts'
 import {
   createAgentIdentity,
   createChatEntry,
@@ -163,6 +164,8 @@ export interface ControlPlaneService {
     displayName: string
     runtimeVersion: string
     location: RuntimeEndpoint['location']
+    /** Explicit instance identity; defaults are derived from the runtime type. */
+    instanceIdentity?: Partial<AgentRuntimeInstanceIdentity>
   }): RuntimeEndpoint
   listEndpoints(): RuntimeEndpoint[]
   // Tasks
@@ -228,6 +231,12 @@ export interface ControlPlaneService {
   listChatEntries(taskID?: UUID): ChatEntry[]
   listSessionBindings(taskID?: UUID): RuntimeSessionBinding[]
   listRuntimeArtifacts(taskID?: UUID): RuntimeArtifactRecord[]
+  /**
+   * Discovers past host conversations for a workspace (host-internal
+   * visibility; the query runs inside the same host process that ran the
+   * turns). Returns [] when the host has no history surface.
+   */
+  discoverHistory(workspacePath: string): Promise<HostHistoryCandidate[]>
   probeEndpoints(): Promise<ProbeOutcome[]>
   close(): void
 }
@@ -264,7 +273,13 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
   }
 
   function providerFor(endpoint: RuntimeEndpoint): { rawValue: string } {
-    return { rawValue: endpoint.nativeConfiguration?.['provider'] ?? 'claude_code' }
+    // Prefer the concrete instance identity (bootstrap sets
+    // provider: codex / claude_code); nativeConfiguration is the fallback.
+    return {
+      rawValue: endpoint.instanceIdentity?.provider.rawValue
+        ?? endpoint.nativeConfiguration?.['provider']
+        ?? 'claude_code',
+    }
   }
 
   return {
@@ -329,7 +344,9 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
     // -----------------------------------------------------------------------
 
     registerEndpoint(params) {
+      const endpointID = uuid()
       const endpoint = createRuntimeEndpoint({
+        id: endpointID,
         runtimeTypeID: params.runtimeTypeID,
         displayName: params.displayName,
         adapterVersion: '1.0.0',
@@ -341,6 +358,7 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
         status: 'discovered',
         guaranteeNote: 'Registered by the control plane.',
         lastProbedAt: now(),
+        instanceIdentity: defaultInstanceIdentity(params, endpointID),
       })
       upsertEndpoint(store, endpoint)
       const registration = createRuntimeAdapterRegistration({
@@ -1147,6 +1165,11 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
       return fetchRuntimeArtifacts(store, taskID)
     },
 
+    async discoverHistory(workspacePath) {
+      if (host.discoverHistory === undefined) return []
+      return host.discoverHistory(workspacePath)
+    },
+
     async probeEndpoints() {
       const outcomes: ProbeOutcome[] = []
       for (const endpoint of fetchEndpoints(store)) {
@@ -1172,6 +1195,9 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
     },
 
     close() {
+      // Release long-lived host processes (codex app-server, SSE streams)
+      // before closing the store, so the process can exit cleanly.
+      host.stop?.()
       store.close()
     },
   }
@@ -1180,6 +1206,37 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
 // ---------------------------------------------------------------------------
 // Small local helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Instance identity for a registered endpoint. Callers can override any
+ * field (e.g. bootstrap supplies the real executable path); the defaults
+ * distinguish endpoints without flattening them into a bare provider name.
+ */
+function defaultInstanceIdentity(
+  params: {
+    runtimeTypeID: string
+    displayName: string
+    location: RuntimeEndpoint['location']
+    instanceIdentity?: Partial<AgentRuntimeInstanceIdentity>
+  },
+  endpointID: UUID,
+): AgentRuntimeInstanceIdentity {
+  const base: AgentRuntimeInstanceIdentity = {
+    provider: providerForRuntimeTypeID(params.runtimeTypeID),
+    surfaceKind: params.location === 'local' ? 'terminal_cli' : 'remote_service',
+    identityBasis: 'installation',
+    stableInstanceKey: `${params.runtimeTypeID}:${endpointID}`,
+    instanceLabel: params.displayName,
+  }
+  return { ...base, ...params.instanceIdentity }
+}
+
+function providerForRuntimeTypeID(runtimeTypeID: string): { rawValue: string } {
+  const normalized = runtimeTypeID.toLowerCase()
+  if (normalized.includes('codex')) return { rawValue: 'codex' }
+  if (normalized.includes('claude')) return { rawValue: 'claude_code' }
+  return { rawValue: normalized.split('/')[0] ?? normalized }
+}
 
 function accentFor(name: string): string {
   let hash = 0

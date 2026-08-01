@@ -5,6 +5,7 @@ import type {
   CodexTurnResult,
   TaskRecord,
 } from '../models.ts'
+import type { ExternalConversationCandidate } from '../conversation-history.ts'
 import type { ProjectContextPackRecord } from '../project-kernel/index.ts'
 import { renderedContextPackMarkdown } from '../project-kernel/index.ts'
 import {
@@ -50,6 +51,7 @@ export interface ClaudeCodeClientLike {
 
 export interface CodexClientLike {
   probe(): Promise<CodexProbeResult>
+  listHistory(workspacePath: string, timeoutMs?: number): Promise<ExternalConversationCandidate[]>
   runReadOnlyTask(params: {
     task: TaskRecord
     contextPack?: ProjectContextPackRecord
@@ -243,6 +245,19 @@ export class LocalChildProcessHarness implements Harness {
   }
 
   async listArtifacts(_sessionID: string): Promise<HarnessArtifactRecord[]> {
+    return []
+  }
+
+  /**
+   * History discovery uses the host's own client process: Codex threads are
+   * only visible to the app-server process that created them, so a fresh
+   * client would see nothing (verified in real acceptance). Claude Code
+   * history is not yet exposed here.
+   */
+  async discoverHistory(workspacePath: string) {
+    if (this.hasCodex()) {
+      return this.codex().listHistory(workspacePath, 30_000)
+    }
     return []
   }
 
