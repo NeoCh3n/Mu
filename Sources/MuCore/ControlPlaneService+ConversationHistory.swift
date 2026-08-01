@@ -13,6 +13,130 @@ extension ControlPlaneService {
     private static let maximumImportedMessageBytes = 8 * 1_024 * 1_024
     private static let maximumImportedHistoryTextBytes = 64 * 1_024 * 1_024
 
+    /// Legacy diagnostics for pre-Kernel migration tests. Runtime dispatch
+    /// must use `buildGovernedContextPack`; keeping this module-internal
+    /// prevents raw transcript envelopes from becoming an adapter API.
+    func enabledImportedContextEnvelope(
+        taskID: UUID
+    ) throws -> EnabledImportedContextEnvelope? {
+        guard let task = try store.fetchTask(id: taskID) else {
+            throw MuError.recordNotFound("Task \(taskID)")
+        }
+        let sources =
+            try store.fetchEnabledTaskContextSources(
+                taskID: taskID,
+                limit: 512
+            )
+        var conversations: [ImportedConversation] = []
+        for source in sources {
+            guard conversations.count
+                    < ContextPackBuilder.defaultMessageLimit,
+                  let conversation =
+                    try store.fetchImportedConversation(
+                        id: source.conversationID
+                    ),
+                  conversation.taskID == taskID else {
+                continue
+            }
+            guard WorkspacePathIdentity.isExactMatch(
+                conversation.canonicalWorkspacePath,
+                task.repositoryPath
+            ) else {
+                throw MuError.invalidTransition(
+                    "An enabled history source no longer matches this Project's "
+                        + "exact workspace. Review or disable it before dispatch."
+                )
+            }
+            conversations.append(conversation)
+        }
+        conversations.reverse()
+        guard !conversations.isEmpty else { return nil }
+        var messagesByConversation:
+            [UUID: [ImportedConversationMessage]] = [:]
+        var totalEligibleMessageCount = 0
+        let recentLimit = min(
+            ContextPackBuilder.defaultMessageLimit,
+            max(4, 1_600 / conversations.count)
+        )
+        for conversation in conversations {
+            let window =
+                try store
+                .fetchImportedConversationContextWindow(
+                    conversationID: conversation.id,
+                    recentLimit: recentLimit,
+                    maximumRetainedTextBytes:
+                        ContextPackBuilder
+                        .defaultMessageByteLimit + 1
+                )
+            totalEligibleMessageCount +=
+                conversation.messageCount
+            var unique:
+                [UUID: ImportedConversationMessage] = [:]
+            if let anchor = window.anchor {
+                unique[anchor.id] = anchor
+            }
+            for message in window.recent {
+                unique[message.id] = message
+            }
+            messagesByConversation[conversation.id] =
+                unique.values.sorted {
+                    $0.sourceOrdinal
+                        < $1.sourceOrdinal
+                }
+        }
+        guard let pack = try ContextPackBuilder.build(
+            task: task,
+            conversations: conversations,
+            messagesByConversation:
+                messagesByConversation,
+            totalEligibleMessageCount:
+                totalEligibleMessageCount
+        ) else {
+            return nil
+        }
+        let selectionMaterial = conversations.map {
+            "\($0.id.uuidString):\($0.snapshotFingerprint)"
+        }.joined(separator: "\u{1E}")
+        return EnabledImportedContextEnvelope(
+            selectionFingerprint: Data(
+                selectionMaterial.utf8
+            ).muSHA256,
+            conversationIDs:
+                conversations.map(\.id),
+            pack: pack
+        )
+    }
+
+    func contextSnapshot(
+        envelope: EnabledImportedContextEnvelope,
+        taskID: UUID,
+        binding: RuntimeSessionBinding
+    ) -> ContextSnapshot {
+        ContextSnapshot(
+            taskID: taskID,
+            targetEndpointID: binding.endpointID,
+            targetBindingID: binding.id,
+            targetNativeSessionID:
+                binding.nativeSessionID,
+            selectionFingerprint:
+                envelope.selectionFingerprint,
+            conversationIDs:
+                envelope.conversationIDs,
+            includedMessageIDs:
+                envelope.pack.includedMessageIDs,
+            content: "",
+            contentSHA256: Data(
+                envelope.pack.content.utf8
+            ).muSHA256,
+            utf8ByteCount:
+                envelope.pack.content.utf8.count,
+            omittedMessageCount:
+                envelope.pack.omittedMessageCount,
+            truncatedMessageCount:
+                envelope.pack.truncatedMessageCount
+        )
+    }
+
     private static func currentRequestFromImportedContextEnvelope(
         _ nativeText: String,
         snapshot: ContextSnapshot
@@ -857,6 +981,7 @@ extension ControlPlaneService {
                 )
             )
         }
+        try migrateLegacyImportedConversationsToContextSources()
         discardConversationHistoryDiscovery(taskID: taskID)
         return imported
     }
@@ -935,8 +1060,8 @@ extension ControlPlaneService {
                     summary:
                         "\(conversation.provider.displayName) history "
                         + (enabled
-                            ? "will be eligible for the next cross-agent Context."
-                            : "was removed from future cross-agent Context."),
+                            ? "is eligible for Context extraction and review."
+                            : "was removed from future Context extraction."),
                     payload: [
                         "conversation_id": conversationID.uuidString,
                         "provider": conversation.provider.rawValue,
@@ -979,6 +1104,9 @@ extension ControlPlaneService {
             affectedEntries[index].updatedAt = Date()
         }
         try store.withTransaction {
+            try redactLegacyImportedConversationContextSource(
+                conversation
+            )
             for snapshot in affectedSnapshots {
                 try store.redactContextSnapshotContent(id: snapshot.id)
             }
@@ -1239,13 +1367,15 @@ extension ControlPlaneService {
             binding.workspacePath
         ) else {
             throw MuError.invalidTransition(
-                "This OpenWorker Context link requires relinking: its session "
+                "This imported Context link requires relinking: its Runtime session "
                 + "belongs to another workspace. Detach the binding, then "
                 + "link or create an exact-workspace session before retrying."
             )
         }
-        let targetOpenWorkerProviderInstanceKey =
-            "openworker:\(binding.endpointID.uuidString)"
+        let targetProvider =
+            try store.fetchRegisteredEndpoint(
+                id: binding.endpointID
+            )?.resolvedInstanceIdentity.provider
         var newestConversations: [ImportedConversation] = []
         for source in sources {
             guard newestConversations.count < conversationLimit,
@@ -1257,9 +1387,9 @@ extension ControlPlaneService {
                 continue
             }
             let isTargetConversation =
-                conversation.provider == .openWorker
-                    && conversation.providerInstanceKey
-                        == targetOpenWorkerProviderInstanceKey
+                targetProvider.map {
+                    conversation.provider == $0
+                } == true
                     && conversation.nativeSessionID
                         == binding.nativeSessionID
                     && WorkspacePathIdentity.isExactMatch(

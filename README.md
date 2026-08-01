@@ -1,14 +1,17 @@
 # Mu
 
-Mu is a local-first runtime control plane for explicit, verifiable project Handoffs
-between heterogeneous agent runtimes.
+Mu is a local-first Project OS and runtime control plane for human–Agent
+collaboration. Codex, Claude Code, OpenWorker, and future Agents participate
+in Mu-owned Projects; their private Runtime state never becomes the Project's
+source of truth.
 
 The macOS app is a native SwiftUI application backed by SQLite and a local
-content-addressed evidence store. It implements Projects, Runs, immutable Git
-Checkpoints, receiver-approved Handoffs, mandatory cross-runtime Replan, capability
-gating, and an append-only execution ledger.
+content-addressed evidence store. Its Project Kernel owns Project, Principal,
+Actor, Membership, Delegation, Task, Lease, Workspace, Event, Artifact, Review,
+and Approval records. Runtime Gateway adapters expose capability-probed control
+without flattening unlike vendor protocols into one fictional API.
 
-Mu 0.7.1 provides runtime-independent Agent identities and a shared macOS Project
+Mu 0.8 provides runtime-independent Agent identities and a shared macOS Project
 workbench. Every Project exposes Chat, Files, Browser, Terminal snapshots, and
 Artifacts regardless of the selected runtime. Atlas, Forge, Lens, Scout, and Relay
 are illustrative Mu work profiles; the actual runtime endpoint and provenance stay
@@ -18,15 +21,15 @@ The macOS UI calls the long-lived folder-backed container a **Project**. Existin
 persistence and adapter contracts retain the internal `TaskRecord` name for backward
 compatibility; a native Agent may still call one execution unit a task or turn.
 
-Workspace Chat now has an explicit routing rule. Text without a mention remains a
-local note. `@OpenWorker`, or `@Agent` when that Agent's preferred Runtime is the
-verified OpenWorker endpoint, queues the message for a persistent native session.
-On the first routed message, Mu requires the user to link an existing OpenWorker
-session or create a new one before sending anything. Later messages continue that
-same binding. A linked session remains visible in OpenWorker Desktop while Mu mirrors
-native messages, live progress, approval requests, and artifact metadata.
+Workspace Chat has an explicit routing rule. Text without a mention remains a
+local note. `@Codex`, `@Claude`, `@OpenWorker`, or an `@Agent` routes one bounded
+Project message through that Agent's verified Runtime Gateway. Codex uses the
+official App Server, Claude Code uses a read-only `stream-json` CLI session, and
+OpenWorker uses an attached exact-workspace sidecar session. Multiple Codex or
+Claude CLI endpoints are distinguished by persisted Runtime instance identity and
+stable instance-specific mentions.
 
-Mu 0.7 adds a project-scoped **Conversation Continuity Layer**. Its provider-neutral
+Mu includes a project-scoped **Conversation Continuity Layer**. Its provider-neutral
 conversation, message, provenance, revision, selection, and Context-receipt records
 let a Project retain reviewed history while the user changes Agent or Runtime. The
 initial built-in sources are Codex, Claude Code, and OpenWorker. `ConversationProvider`
@@ -43,25 +46,19 @@ real-time read-only-check progress view. The same provider selector is available
 Workspace Chat through **Find history**. Mu only invokes selected providers, then
 shows conversations whose canonical workspace exactly matches the Project folder in a
 visually separate review surface. The user explicitly chooses which local copies may
-become Context. Codex history
+become eligible for bounded candidate extraction and human review. Codex history
 comes from the official App Server, OpenWorker history from the verified local REST
 protocol, and Claude Code history from a bounded read-only `history_only` path. Only
 visible user/assistant text is copied by the built-in adapters; reasoning, thinking,
 tools, system messages, and developer instructions are excluded.
 
-The first eligible message to a different native OpenWorker session carries one
-quoted, untrusted Context snapshot capped at 32 KiB, 80 messages, and 8 KiB per
-message. Mu records the source revisions, included message IDs, SHA-256, byte count,
-omissions, and truncations, but not the generated Context plaintext. That full
-envelope exists only in memory for dispatch; the durable snapshot receipt and ledger
-contain only hashes, IDs, and counts. Imported visible history is still an explicit
-local SQLite copy. Mu excludes an imported OpenWorker source only when its provider
-instance, native session, and canonical workspace match the target envelope, fails
-closed before sending Context across workspaces, and does not resend an ambiguous
-delivery automatically. A newly linked OpenWorker session must match the Task's
-exact canonical workspace. Older mismatched links are diagnosed before dispatch and
-can be safely replaced with an exact-workspace session while queued messages remain
-queued.
+Imported transcripts are Raw Sources, never Project truth and never direct Runtime
+prompts. Codex, Claude Code, and OpenWorker receive a new governed Context Pack for
+each turn. Only accepted, policy-authorized records and verified Artifacts can enter
+the Pack. Mu pins the exact Actor, Principal, Project, Task, Workspace, Runtime
+binding, fenced lease, policy versions, item hashes, rendered CAS object, and native
+delivery receipt. A new accepted record, policy or Task-contract change, conflict
+resolution, or missing CAS object makes an unsubmitted Pack stale.
 
 Canonical workspace matching means exact string equality after path standardization
 and symlink resolution. It is deliberately not a claim of filesystem physical
@@ -70,10 +67,9 @@ different resulting paths or worktrees. Claude Code's bounded local history scan
 starts only when the user selects Claude Code while creating a Task or using
 **Find history**; discovery
 alone neither imports nor sends content. Removing Mu's local history copy also
-clears any unsent transient Context derived from it, but cannot recall Context
-already delivered to a native Runtime.
+marks its Raw Source redacted while retaining immutable audit receipts.
 
-Mu 0.7.1 also keeps the Agent product separate from the concrete instance that
+Mu also keeps the Agent product separate from the concrete instance that
 created a conversation. Codex history preserves native `appServer`, `cli`, `exec`,
 and `vscode` sources. The one local Codex desktop application is shown as
 **Codex Desktop**; multiple Codex CLI and Claude Code CLI histories remain distinct
@@ -90,15 +86,15 @@ settings, and writes a tombstone so it cannot reappear after restart. A removed
 Runtime cannot be used for new scheduling, Checkpoint capture, Handoff actions, or
 Codex actions.
 
-Mu also includes a live Codex App Server adapter. The app negotiates the official
+Mu includes a live Codex App Server adapter. The app negotiates the official
 stdio protocol, probes account/thread capabilities, and can dispatch an initial Project run
 or a receiving Replan through `thread/start` and `turn/start`. Both paths run inside
 a read-only sandbox with approval escalation disabled. The selected Mu Agent role is
 included in the prompt. Native Codex thread and turn IDs are persisted as soon as
 each protocol stage succeeds, and the final output is stored in the
-content-addressed evidence store and append-only ledger. Mu 0.7 does not claim
-Codex Continue, Cancel, workspace writes, Workspace Chat dispatch, or approval
-responses.
+content-addressed evidence store and append-only ledger. Exact-workspace read-only
+continuations and interruption use the same native thread. Mu does not claim Codex
+workspace writes or Runtime approval interception.
 
 ## Requirements
 
@@ -144,16 +140,18 @@ Mu ships two offline synthetic endpoints so the control-plane workflow remains
 testable without vendor accounts. The manual artifact bridge captures Git evidence
 but does not claim live runtime control. A live Codex App Server endpoint is
 auto-discovered from the installed ChatGPT/Codex app and must pass an in-app probe
-before scheduling. Claude Desktop exposes no supported local agent-control CLI on
-this machine, so Mu keeps that boundary artifact-only instead of claiming control.
-Mu discovers and can open the installed OpenWorker Desktop application. For the
+before scheduling. A discovered Claude Code CLI must pass executable and local-auth
+probes before Mu advertises Start, Continue, visible stream events, or interruption.
+Its initial safety profile permits only read/search tools and disables writes,
+shell commands, and network tools. Mu discovers and can open the installed
+OpenWorker Desktop application. For the
 verified 0.1.6 build, an explicit probe may activate its tokenless legacy sidecar only
 when it is running on `http://127.0.0.1:<port>`. The probe checks health, Agent, and
 session responses before advertising Start, Continue, streaming, approval-intent,
 Cancel, and artifact-discovery capabilities. Probe failure clears those claims.
 
 Current OpenWorker source builds protect the desktop sidecar with a private,
-in-memory launch token. Mu 0.7 does not extract that token, scrape the embedded
+in-memory launch token. Mu does not extract that token, scrape the embedded
 webview, or persist OpenWorker credentials, so those builds remain unavailable
 unless a future explicit authenticated-endpoint flow is added. Pi remains a
 researched future adapter candidate and is not presented as live in this build.
@@ -174,6 +172,13 @@ See [docs/OPENWORKER_ADAPTER.md](docs/OPENWORKER_ADAPTER.md) for native-session
 routing and synchronization guarantees.
 See [docs/HISTORY_CONTEXT.md](docs/HISTORY_CONTEXT.md) for the Conversation
 Continuity Layer, provider extension contract, resource bounds, filtering, consent,
-persistence, and cross-Agent Context guarantees.
+persistence, and Raw Source guarantees.
+See [docs/CONTEXT_KERNEL.md](docs/CONTEXT_KERNEL.md) for normalized records,
+policy-first retrieval, review/conflict state, immutable Packs, delivery receipts,
+and the future MCP/API boundary.
+See [docs/PROJECT_KERNEL.md](docs/PROJECT_KERNEL.md) for the Mu-owned collaboration
+state and invariants.
+See [docs/RUNTIME_GATEWAY.md](docs/RUNTIME_GATEWAY.md) for the three built-in
+adapter contracts and future BYOA extension boundary.
 See [docs/SECOND_RUNTIME_PROBE.md](docs/SECOND_RUNTIME_PROBE.md) for the honest
 Claude, OpenWorker, and second-runtime boundary.

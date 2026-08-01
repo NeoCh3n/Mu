@@ -576,6 +576,57 @@ struct RegisterRuntimeSheet: View {
                     }
 
                     HStack(spacing: 14) {
+                        fieldGroup("SURFACE") {
+                            Picker(
+                                "Surface",
+                                selection: $draft.surfaceKind
+                            ) {
+                                Text("Desktop")
+                                    .tag(
+                                        AgentRuntimeSurfaceKind
+                                            .desktopApplication
+                                    )
+                                Text("Terminal CLI")
+                                    .tag(
+                                        AgentRuntimeSurfaceKind
+                                            .terminalCLI
+                                    )
+                                Text("Local service")
+                                    .tag(
+                                        AgentRuntimeSurfaceKind
+                                            .localService
+                                    )
+                                Text("Remote service")
+                                    .tag(
+                                        AgentRuntimeSurfaceKind
+                                            .remoteService
+                                    )
+                            }
+                            .labelsHidden()
+                        }
+                        fieldGroup("INSTANCE LABEL") {
+                            TextField(
+                                "e.g. Claude · Terminal 2",
+                                text: $draft.instanceLabel
+                            )
+                            .textFieldStyle(.roundedBorder)
+                        }
+                        fieldGroup("TERMINAL ID · OPTIONAL") {
+                            TextField(
+                                "e.g. ttys003",
+                                text:
+                                    $draft
+                                    .terminalIdentifier
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(
+                                draft.surfaceKind
+                                    != .terminalCLI
+                            )
+                        }
+                    }
+
+                    HStack(spacing: 14) {
                         fieldGroup("LOCATION") {
                             Picker("Location", selection: $draft.location) {
                                 ForEach(EndpointLocation.allCases, id: \.self) { location in

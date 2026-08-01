@@ -40,12 +40,23 @@ public struct OpenWorkerSessionSyncResult: Hashable, Sendable {
 
 public final class ControlPlaneService: @unchecked Sendable {
     public static let codexRuntimeTypeID = "openai.codex/app-server"
+    public static let claudeCodeRuntimeTypeID =
+        "anthropic.claude-code/cli"
     public static let openWorkerRuntimeTypeID = "andrewyng.openworker/desktop"
     public static let codexEndpointID = UUID(
         uuidString: "2BF4A318-CF0A-46C9-B1BA-4997C3F4A230"
     )!
     public static let openWorkerEndpointID = UUID(
         uuidString: "F80FE2E4-55C9-4A30-83E1-77DCE2D63B3B"
+    )!
+    public static let claudeCodeEndpointID = UUID(
+        uuidString: "1F6A8867-4290-4B98-A8B0-9E14564DEAA4"
+    )!
+    public static let localOwnerPrincipalID = UUID(
+        uuidString: "CF0F5E7B-CC4C-55B1-A567-8EF56E282D86"
+    )!
+    public static let localHumanActorID = UUID(
+        uuidString: "80604C4D-BB4E-56B0-94CE-9B6CC107FC0A"
     )!
     public static let syntheticEndpointAID = UUID(
         uuidString: "7DDA46AF-32B4-4F75-A051-0A5A02B15D01"
@@ -88,12 +99,27 @@ public final class ControlPlaneService: @unchecked Sendable {
         .discoverGitArtifacts,
         .approvalIntent
     ]
+    public static let claudeCodeImplementedCapabilities:
+        Set<RuntimeCapability> = [
+            .start,
+            .continueRun,
+            .cancel,
+            .streamEvents,
+            .contributeCheckpointEvidence,
+            .discoverGitArtifacts
+        ]
 
     public let store: SQLiteStore
     public let artifactStore: ArtifactStore
 
-    private let repositoryProbe: GitRepositoryProbe
+    let repositoryProbe: GitRepositoryProbe
     private let openWorkerSyncGate = OpenWorkerSyncGate()
+    let codexRuntimeLock = NSLock()
+    var activeCodexClients:
+        [UUID: CodexAppServerClient] = [:]
+    let claudeRuntimeLock = NSLock()
+    var activeClaudeClients:
+        [UUID: ClaudeCodeClient] = [:]
     let additionalHistoryAdapters:
         [any ConversationHistoryAdapter]
     let historyDiscoveryLock = NSLock()
@@ -136,6 +162,9 @@ public final class ControlPlaneService: @unchecked Sendable {
         try redactLegacyImportedContextPlaintext()
         try bootstrapEndpoints()
         try bootstrapAgentIdentities()
+        try bootstrapProjectKernel()
+        try migrateLegacyImportedConversationsToContextSources()
+        try refreshRuntimeAdapterRegistrations()
     }
 
     public func bootstrapEndpoints() throws {
@@ -229,6 +258,41 @@ public final class ControlPlaneService: @unchecked Sendable {
             )
         }
 
+        if let executableURL = ClaudeCodeDiscovery.executableURL(),
+           !existingIDs.contains(Self.claudeCodeEndpointID),
+           !deletedIDs.contains(Self.claudeCodeEndpointID) {
+            endpointsToInsert.append(
+                RuntimeEndpoint(
+                    id: Self.claudeCodeEndpointID,
+                    runtimeTypeID:
+                        Self.claudeCodeRuntimeTypeID,
+                    displayName: "Claude Code CLI",
+                    adapterVersion: "0.1.0",
+                    runtimeVersion: "probe required",
+                    location: .local,
+                    provenance: .vendorCLI,
+                    permissionModel: .promptGate,
+                    capabilities: [],
+                    status: .discovered,
+                    guaranteeNote:
+                        "Claude Code CLI detected. Probe its local "
+                        + "authentication and stream-json contract before "
+                        + "scheduling a read-only Task.",
+                    nativeConfiguration: [
+                        "executable": executableURL.path,
+                        RuntimeIdentityConfigurationKey.provider:
+                            ConversationProvider.claudeCode.rawValue,
+                        RuntimeIdentityConfigurationKey.surfaceKind:
+                            AgentRuntimeSurfaceKind.terminalCLI.rawValue,
+                        RuntimeIdentityConfigurationKey.instanceLabel:
+                            "Claude Code CLI",
+                        RuntimeIdentityConfigurationKey.nativeSource:
+                            "managed_cli"
+                    ]
+                )
+            )
+        }
+
         if let discovery = OpenWorkerDiscovery.discover(),
            !existingIDs.contains(Self.openWorkerEndpointID),
            !deletedIDs.contains(Self.openWorkerEndpointID) {
@@ -299,6 +363,45 @@ public final class ControlPlaneService: @unchecked Sendable {
                     "OpenWorker Desktop is not installed. Workspace routing is disabled."
             }
             try store.upsertEndpoint(registeredOpenWorker)
+        }
+
+        if var registeredClaude = existing.first(where: {
+            $0.id == Self.claudeCodeEndpointID
+                && !deletedIDs.contains($0.id)
+        }) {
+            registeredClaude.adapterVersion = "0.1.0"
+            if let executableURL =
+                ClaudeCodeDiscovery.executableURL() {
+                var configuration =
+                    registeredClaude.nativeConfiguration ?? [:]
+                configuration.merge([
+                    "executable": executableURL.path,
+                    RuntimeIdentityConfigurationKey.provider:
+                        ConversationProvider.claudeCode.rawValue,
+                    RuntimeIdentityConfigurationKey.surfaceKind:
+                        AgentRuntimeSurfaceKind.terminalCLI.rawValue,
+                    RuntimeIdentityConfigurationKey.instanceLabel:
+                        "Claude Code CLI",
+                    RuntimeIdentityConfigurationKey.nativeSource:
+                        "managed_cli"
+                ]) { _, discoveredValue in discoveredValue }
+                registeredClaude.nativeConfiguration =
+                    configuration
+                if registeredClaude.status != .active {
+                    registeredClaude.status = .discovered
+                    registeredClaude.capabilities = []
+                    registeredClaude.guaranteeNote =
+                        "Claude Code CLI detected. Probe its local "
+                        + "authentication and stream-json contract before "
+                        + "scheduling a read-only Task."
+                }
+            } else {
+                registeredClaude.status = .offline
+                registeredClaude.capabilities = []
+                registeredClaude.guaranteeNote =
+                    "Claude Code CLI is not installed at a known local path."
+            }
+            try store.upsertEndpoint(registeredClaude)
         }
 
         guard !endpointsToInsert.isEmpty else { return }
@@ -483,6 +586,22 @@ public final class ControlPlaneService: @unchecked Sendable {
                 }
             }
             try store.upsertAgent(agent)
+            try store.upsertProjectActor(
+                ProjectActorRecord(
+                    id:
+                        ProjectActorRecord
+                        .stableAgentIdentityActorID(
+                            agentIdentityID: agent.id
+                        ),
+                    principalID: Self.localOwnerPrincipalID,
+                    kind: .agent,
+                    displayName: agent.displayName,
+                    agentIdentityID: agent.id,
+                    runtimeEndpointID: preferredEndpointID,
+                    createdAt: agent.createdAt,
+                    updatedAt: agent.createdAt
+                )
+            )
             try store.appendEvent(
                 LedgerEvent(
                     type: "agent.created",
@@ -517,6 +636,7 @@ public final class ControlPlaneService: @unchecked Sendable {
         let now = Date()
         for index in tasks.indices {
             tasks[index].assignedAgentIdentityID = nil
+            tasks[index].assignedActorID = nil
             tasks[index].updatedAt = now
         }
         for index in runs.indices {
@@ -535,6 +655,24 @@ public final class ControlPlaneService: @unchecked Sendable {
                 try store.upsertRuntimeSessionBinding(binding)
             }
             try store.deleteAgent(id: id)
+            let actorID =
+                ProjectActorRecord.stableAgentIdentityActorID(
+                    agentIdentityID: id
+                )
+            if var actor = try store.fetchProjectActor(id: actorID) {
+                actor.status = .retired
+                actor.updatedAt = now
+                try store.upsertProjectActor(actor)
+            }
+            for task in tasks {
+                if var link = try store.fetchTaskProjectLink(
+                    taskID: task.id
+                ), link.assignedToActorID == actorID {
+                    link.assignedToActorID = nil
+                    link.updatedAt = now
+                    try store.upsertTaskProjectLink(link)
+                }
+            }
             try store.upsertRegistryTombstone(
                 RegistryTombstone(
                     id: id,
@@ -566,6 +704,9 @@ public final class ControlPlaneService: @unchecked Sendable {
         provenance: IntegrationProvenance,
         permissionModel: PermissionModel,
         executablePath: String?,
+        surfaceKind: AgentRuntimeSurfaceKind = .unknown,
+        instanceLabel: String = "",
+        terminalIdentifier: String = "",
         notes: String
     ) throws -> RuntimeEndpoint {
         let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -588,11 +729,6 @@ public final class ControlPlaneService: @unchecked Sendable {
         }
         let existing = try store.fetchEndpoints()
         guard !existing.contains(where: {
-            $0.runtimeTypeID.compare(typeID, options: .caseInsensitive) == .orderedSame
-        }) else {
-            throw MuError.invalidTransition("Runtime type ID “\(typeID)” is already registered.")
-        }
-        guard !existing.contains(where: {
             $0.displayName.compare(name, options: [.caseInsensitive, .diacriticInsensitive])
                 == .orderedSame
         }) else {
@@ -601,11 +737,37 @@ public final class ControlPlaneService: @unchecked Sendable {
         let path = executablePath?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let userNotes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedInstanceLabel =
+            instanceLabel.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+        let normalizedTerminalIdentifier =
+            terminalIdentifier.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
         var guarantee =
             "Manually registered definition. No adapter probe has completed, so scheduling and "
             + "Task Run dispatch is disabled."
         if !userNotes.isEmpty {
             guarantee += " \(userNotes)"
+        }
+        var nativeConfiguration:
+            [String: String] = [
+                RuntimeIdentityConfigurationKey.surfaceKind:
+                    surfaceKind.rawValue,
+                RuntimeIdentityConfigurationKey.instanceLabel:
+                    normalizedInstanceLabel.isEmpty
+                    ? name
+                    : normalizedInstanceLabel
+            ]
+        if let path, !path.isEmpty {
+            nativeConfiguration["executable"] = path
+        }
+        if !normalizedTerminalIdentifier.isEmpty {
+            nativeConfiguration[
+                RuntimeIdentityConfigurationKey
+                    .terminalIdentifier
+            ] = normalizedTerminalIdentifier
         }
         let endpoint = RuntimeEndpoint(
             runtimeTypeID: typeID,
@@ -618,12 +780,22 @@ public final class ControlPlaneService: @unchecked Sendable {
             capabilities: [],
             status: .offline,
             guaranteeNote: guarantee,
-            nativeConfiguration: path.flatMap { value in
-                value.isEmpty ? nil : ["executable": value]
-            }
+            nativeConfiguration: nativeConfiguration
+        )
+        let actor = ProjectActorRecord(
+            id: ProjectActorRecord.stableRuntimeActorID(
+                endpointID: endpoint.id
+            ),
+            principalID: Self.localOwnerPrincipalID,
+            kind: .agent,
+            displayName:
+                endpoint.resolvedInstanceIdentity
+                .instanceLabel,
+            runtimeEndpointID: endpoint.id
         )
         try store.withTransaction {
             try store.upsertEndpoint(endpoint)
+            try store.upsertProjectActor(actor)
             try store.appendEvent(
                 LedgerEvent(
                     type: "endpoint.created",
@@ -636,6 +808,7 @@ public final class ControlPlaneService: @unchecked Sendable {
                 )
             )
         }
+        try refreshRuntimeAdapterRegistrations()
         return endpoint
     }
 
@@ -676,6 +849,45 @@ public final class ControlPlaneService: @unchecked Sendable {
                 agents[index].preferredEndpointID = nil
             }
             for agent in agents { try store.upsertAgent(agent) }
+            let runtimeActorID =
+                ProjectActorRecord.stableRuntimeActorID(
+                    endpointID: id
+                )
+            var affectedActorIDs =
+                Set([runtimeActorID])
+            var projectActors =
+                try store.fetchProjectActors().filter {
+                    $0.runtimeEndpointID == id
+                }
+            for index in projectActors.indices {
+                affectedActorIDs.insert(
+                    projectActors[index].id
+                )
+                if projectActors[index].id
+                    == runtimeActorID {
+                    projectActors[index].status = .retired
+                } else {
+                    projectActors[index]
+                        .runtimeEndpointID = nil
+                }
+                projectActors[index].updatedAt = now
+                try store.upsertProjectActor(
+                    projectActors[index]
+                )
+            }
+            var delegations =
+                try store.fetchDelegations().filter {
+                    affectedActorIDs.contains(
+                        $0.agentActorID
+                    )
+                }
+            for index in delegations.indices {
+                delegations[index].status = .revoked
+                delegations[index].updatedAt = now
+                try store.upsertDelegation(
+                    delegations[index]
+                )
+            }
             try store.upsertRegistryTombstone(
                 RegistryTombstone(
                     id: id,
@@ -699,7 +911,11 @@ public final class ControlPlaneService: @unchecked Sendable {
                         "session_binding_references": String(sessionBindingReferences),
                         "interaction_references": String(interactionReferences),
                         "runtime_artifact_references": String(runtimeArtifactReferences),
-                        "cleared_agent_preferences": String(agents.count)
+                        "cleared_agent_preferences": String(agents.count),
+                        "retired_or_detached_actors":
+                            String(projectActors.count),
+                        "revoked_delegations":
+                            String(delegations.count)
                     ]
                 )
             )
@@ -722,8 +938,13 @@ public final class ControlPlaneService: @unchecked Sendable {
     }
 
     @discardableResult
-    public func probeCodexEndpoint() throws -> RuntimeEndpoint {
-        guard var endpoint = try store.fetchRegisteredEndpoint(id: Self.codexEndpointID) else {
+    public func probeCodexEndpoint(
+        endpointID: UUID =
+            ControlPlaneService.codexEndpointID
+    ) throws -> RuntimeEndpoint {
+        guard var endpoint = try store.fetchRegisteredEndpoint(id: endpointID),
+              endpoint.runtimeTypeID
+                == Self.codexRuntimeTypeID else {
             throw MuError.recordNotFound("Codex App Server endpoint")
         }
         guard let path = endpoint.nativeConfiguration?["executable"] else {
@@ -743,19 +964,33 @@ public final class ControlPlaneService: @unchecked Sendable {
                 ? "Live official App Server connection verified on \(result.platformOS). "
                     + "Initial read-only Task runs and receiving Replans create persistent native "
                     + "threads and turns with event receipts. Local Git evidence is available. "
-                    + "Workspace chat dispatch, Continue, Cancel, writes, and approvals are not exposed."
+                    + "Exact-workspace read-only Workspace Chat continuation and interruption are exposed; "
+                    + "writes and Runtime approval interception are not."
                 : "App Server responded, but no signed-in account is available. Scheduling is disabled."
+            let registration = RuntimeAdapterRegistration(
+                endpointID: endpoint.id,
+                manifest:
+                    RuntimeGatewayRegistry.manifest(
+                        for: endpoint
+                    ),
+                probedAt: endpoint.lastProbedAt
+            )
             try store.withTransaction {
                 guard try store.fetchRegisteredEndpoint(id: endpoint.id) != nil else {
                     throw MuError.recordNotFound("Codex App Server endpoint")
                 }
                 try store.upsertEndpoint(endpoint)
+                try store.upsertRuntimeAdapterRegistration(
+                    registration
+                )
                 if result.signedIn,
+                   endpoint.id == Self.codexEndpointID,
                    var atlas = try store.fetchAgent(id: Self.atlasAgentID) {
                     atlas.preferredEndpointID = endpoint.id
                     try store.upsertAgent(atlas)
                 }
                 if result.signedIn,
+                   endpoint.id == Self.codexEndpointID,
                    var relay = try store.fetchAgent(id: Self.relayAgentID) {
                     relay.preferredEndpointID = endpoint.id
                     try store.upsertAgent(relay)
@@ -792,6 +1027,140 @@ public final class ControlPlaneService: @unchecked Sendable {
                         payload: [
                             "runtime_type_id": endpoint.runtimeTypeID,
                             "error": error.localizedDescription
+                        ]
+                    )
+                )
+            }
+            throw error
+        }
+    }
+
+    @discardableResult
+    public func probeClaudeCodeEndpoint(
+        endpointID: UUID =
+            ControlPlaneService.claudeCodeEndpointID
+    ) throws -> RuntimeEndpoint {
+        guard var endpoint = try store.fetchRegisteredEndpoint(
+            id: endpointID
+        ), endpoint.runtimeTypeID
+            == Self.claudeCodeRuntimeTypeID else {
+            throw MuError.recordNotFound(
+                "Claude Code CLI endpoint"
+            )
+        }
+        guard let path = endpoint.nativeConfiguration?[
+            "executable"
+        ] else {
+            throw MuError.commandFailed(
+                "Claude Code executable path is not registered."
+            )
+        }
+        let client = ClaudeCodeClient(
+            executableURL: URL(fileURLWithPath: path)
+        )
+        do {
+            let result = try client.probe()
+            endpoint.runtimeVersion = result.version
+            endpoint.status =
+                result.loggedIn ? .active : .degraded
+            endpoint.capabilities = result.loggedIn
+                ? Self.claudeCodeImplementedCapabilities
+                : []
+            endpoint.permissionModel = .promptGate
+            endpoint.provenance = .vendorCLI
+            endpoint.adapterVersion = "0.1.0"
+            endpoint.lastProbedAt = Date()
+            endpoint.guaranteeNote = result.loggedIn
+                ? "Verified Claude Code CLI \(result.version). Mu can "
+                    + "launch and resume exact-workspace read-only "
+                    + "stream-json sessions, mirror visible output, "
+                    + "interrupt Mu-launched processes, and publish "
+                    + "reviewable artifacts."
+                : "Claude Code CLI responded, but its current local "
+                    + "authentication is unavailable. Sign in from "
+                    + "Claude Code, then re-probe."
+            var configuration =
+                endpoint.nativeConfiguration ?? [:]
+            configuration["auth_method"] = result.authMethod
+            configuration["api_provider"] = result.apiProvider
+            endpoint.nativeConfiguration = configuration
+            let registration = RuntimeAdapterRegistration(
+                endpointID: endpoint.id,
+                manifest:
+                    RuntimeGatewayRegistry.manifest(
+                        for: endpoint
+                    ),
+                probedAt: endpoint.lastProbedAt
+            )
+            try store.withTransaction {
+                guard try store.fetchRegisteredEndpoint(
+                    id: endpoint.id
+                ) != nil else {
+                    throw MuError.recordNotFound(
+                        "Claude Code CLI endpoint"
+                    )
+                }
+                try store.upsertEndpoint(endpoint)
+                try store.upsertRuntimeAdapterRegistration(
+                    registration
+                )
+                try store.appendEvent(
+                    LedgerEvent(
+                        type: "adapter.probed",
+                        summary: result.loggedIn
+                            ? "Verified live Claude Code CLI endpoint."
+                            : "Claude Code CLI responded without active authentication.",
+                        payload: [
+                            "runtime_type_id":
+                                endpoint.runtimeTypeID,
+                            "runtime_version":
+                                result.version,
+                            "signed_in":
+                                String(result.loggedIn),
+                            "auth_method":
+                                result.authMethod,
+                            "api_provider":
+                                result.apiProvider,
+                            "gateway_contract_version": "1"
+                        ]
+                    )
+                )
+            }
+            return endpoint
+        } catch {
+            endpoint.status = .degraded
+            endpoint.capabilities = []
+            endpoint.lastProbedAt = Date()
+            endpoint.guaranteeNote =
+                "Claude Code CLI probe failed. "
+                + error.localizedDescription
+            try? store.withTransaction {
+                guard try store.fetchRegisteredEndpoint(
+                    id: endpoint.id
+                ) != nil else {
+                    return
+                }
+                try store.upsertEndpoint(endpoint)
+                try store.upsertRuntimeAdapterRegistration(
+                    RuntimeAdapterRegistration(
+                        endpointID: endpoint.id,
+                        manifest:
+                            RuntimeGatewayRegistry.manifest(
+                                for: endpoint
+                            ),
+                        probedAt: endpoint.lastProbedAt
+                    )
+                )
+                try store.appendEvent(
+                    LedgerEvent(
+                        type: "adapter.probe_failed",
+                        summary:
+                            "Claude Code CLI capability probe failed.",
+                        payload: [
+                            "runtime_type_id":
+                                endpoint.runtimeTypeID,
+                            "error":
+                                error.localizedDescription
                         ]
                     )
                 )
@@ -905,7 +1274,7 @@ public final class ControlPlaneService: @unchecked Sendable {
 
     @discardableResult
     public func dispatchCodexTask(runID: UUID) throws -> CodexTurnResult {
-        guard let initialRun = try store.fetchRun(id: runID) else {
+        guard var initialRun = try store.fetchRun(id: runID) else {
             throw MuError.recordNotFound("Run \(runID)")
         }
         guard initialRun.purpose == .execution else {
@@ -932,28 +1301,148 @@ public final class ControlPlaneService: @unchecked Sendable {
             throw MuError.invalidTransition("The Codex Run is not the Task's current Run.")
         }
         let agent = try initialRun.agentIdentityID.flatMap { try store.fetchAgent(id: $0) }
-
-        try store.appendEvent(
-            LedgerEvent(
-                taskID: task.id,
-                runID: initialRun.id,
-                type: "codex.task.dispatching",
-                summary: "Dispatching a native read-only Task to Codex App Server.",
-                payload: [
-                    "sandbox": "read-only",
-                    "network_access": "false",
-                    "approval_policy": "never",
-                    "client_user_message_id": initialRun.id.uuidString
-                ]
-            )
+        try RuntimeGatewayRegistry.require(
+            .createSession,
+            endpoint: endpoint
         )
+        let kernel = try projectKernelContext(taskID: task.id)
+        guard let actorID = kernel.actor?.id else {
+            throw MuError.invalidTransition(
+                "Codex has no authorized Project Actor."
+            )
+        }
+        let bindingID = UUID()
+        let lease = try claimTaskLease(
+            taskID: task.id,
+            endpointID: endpoint.id,
+            actorID: actorID,
+            runtimeBindingID: bindingID,
+            duration: 30 * 60
+        )
+        let contextPack = try buildGovernedContextPack(
+            taskID: task.id,
+            actorID: actorID,
+            endpointID: endpoint.id,
+            runtimeBindingID: bindingID,
+            taskLeaseID: lease.id
+        )
+        let initialPrompt = contextPack.renderedMarkdown
+        let provisionalBinding = RuntimeSessionBinding(
+            id: bindingID,
+            taskID: task.id,
+            projectID: kernel.project.id,
+            workspaceID: kernel.workspace.id,
+            actorID: actorID,
+            principalID: kernel.principal?.id,
+            taskLeaseID: lease.id,
+            runID: initialRun.id,
+            contextPackID: contextPack.id,
+            endpointID: endpoint.id,
+            agentIdentityID: initialRun.agentIdentityID,
+            nativeSessionID:
+                "pending-\(bindingID.uuidString.lowercased())",
+            nativeAgentName:
+                agent?.displayName ?? "Codex",
+            workspacePath:
+                kernel.workspace.repositoryPath,
+            connectionMode:
+                "official_app_server_stdio",
+            state: .connecting,
+            lastActivitySummary:
+                "Preparing a governed Codex Project turn."
+        )
+        let responseEntry = ChatEntry(
+            taskID: task.id,
+            agentIdentityID: agent?.id,
+            runID: initialRun.id,
+            runtimeSessionBindingID: bindingID,
+            deliveryState: .routing,
+            authorKind: .agent,
+            authorName:
+                agent?.displayName ?? endpoint.displayName,
+            text: "Starting Codex…"
+        )
+        initialRun.projectID = kernel.project.id
+        initialRun.workspaceID = kernel.workspace.id
+        initialRun.actorID = actorID
+        initialRun.principalID = kernel.principal?.id
+        initialRun.taskLeaseID = lease.id
+        initialRun.contextPackID = contextPack.id
+        initialRun.updatedAt = Date()
+        task.projectID = kernel.project.id
+        task.workspaceID = kernel.workspace.id
+        task.assignedActorID = actorID
+        task.status = .running
+        task.updatedAt = Date()
+        do {
+            try store.withTransaction {
+                try store.upsertRun(initialRun)
+                try store.upsertTask(task)
+                try store.upsertRuntimeSessionBinding(
+                    provisionalBinding
+                )
+                try store.insertChatEntry(responseEntry)
+                try store.appendEvent(
+                    LedgerEvent(
+                        projectID: kernel.project.id,
+                        actorID: kernel.actor?.id,
+                        principalID: kernel.principal?.id,
+                        workspaceID: kernel.workspace.id,
+                        taskID: task.id,
+                        runID: initialRun.id,
+                        type: "codex.task.dispatching",
+                        summary:
+                            "Dispatching a native read-only Task to Codex App Server.",
+                        payload: [
+                            "sandbox": "read-only",
+                            "network_access": "false",
+                            "approval_policy": "never",
+                            "client_user_message_id":
+                                initialRun.id.uuidString,
+                            "lease_id": lease.id.uuidString,
+                            "context_pack_id":
+                                contextPack.id.uuidString
+                        ]
+                    )
+                )
+            }
+        } catch {
+            _ = try? releaseTaskLease(id: lease.id)
+            throw error
+        }
 
         let client = CodexAppServerClient(executableURL: URL(fileURLWithPath: path))
-        defer { client.stop() }
+        codexRuntimeLock.withLock {
+            activeCodexClients[runID] = client
+        }
+        defer {
+            _ = codexRuntimeLock.withLock {
+                activeCodexClients.removeValue(forKey: runID)
+            }
+            client.stop()
+        }
+        let mirror = ClaudeCodeOutputMirror {
+            [weak self] text, force in
+            guard let self else { return }
+            try? self.persistClaudeCodeVisibleText(
+                entryID: responseEntry.id,
+                bindingID: bindingID,
+                text: text,
+                force: force,
+                runtimeName: "Codex"
+            )
+        }
         do {
+            try recordContextDelivery(
+                projectID: kernel.project.id,
+                packID: contextPack.id,
+                status: .prepared
+            )
             let result = try client.runReadOnlyTask(
                 task: task,
                 agent: agent,
+                contextPack: contextPack,
+                promptOverride: initialPrompt,
                 clientUserMessageID: initialRun.id.uuidString,
                 onThreadStarted: { [store] threadID in
                     guard var stagedRun = try store.fetchRun(id: runID) else {
@@ -964,10 +1453,36 @@ public final class ControlPlaneService: @unchecked Sendable {
                     }
                     stagedRun.nativeThreadID = threadID
                     stagedRun.updatedAt = Date()
+                    var stagedLease =
+                        try store.fetchTaskLease(id: lease.id)
+                        ?? lease
+                    stagedLease.runtimeBindingID = bindingID
+                    stagedLease.lastHeartbeatAt = Date()
+                    guard var binding =
+                        try store.fetchRuntimeSessionBinding(
+                            id: bindingID
+                        ) else {
+                        throw MuError.recordNotFound(
+                            "Prepared Codex Runtime binding"
+                        )
+                    }
+                    binding.nativeSessionID = threadID
+                    binding.state = .connecting
+                    binding.lastActivitySummary =
+                        "Codex created a persistent Project thread."
+                    binding.updatedAt = Date()
                     try store.withTransaction {
                         try store.upsertRun(stagedRun)
+                        try store.upsertTaskLease(stagedLease)
+                        try store.upsertRuntimeSessionBinding(
+                            binding
+                        )
                         try store.appendEvent(
                             LedgerEvent(
+                                projectID: kernel.project.id,
+                                actorID: kernel.actor?.id,
+                                principalID: kernel.principal?.id,
+                                workspaceID: kernel.workspace.id,
                                 taskID: stagedRun.taskID,
                                 runID: stagedRun.id,
                                 type: "codex.thread.started",
@@ -990,10 +1505,30 @@ public final class ControlPlaneService: @unchecked Sendable {
                     stagedRun.nativeTurnID = turnID
                     stagedRun.state = .active
                     stagedRun.updatedAt = Date()
+                    guard var binding =
+                        try store
+                        .fetchRuntimeSessionBinding(
+                            id: bindingID
+                        ) else {
+                        throw MuError.recordNotFound(
+                            "Codex Runtime binding"
+                        )
+                    }
+                    binding.state = .working
+                    binding.lastActivitySummary =
+                        "Codex is working in the bounded Project workspace."
+                    binding.updatedAt = Date()
                     try store.withTransaction {
                         try store.upsertRun(stagedRun)
+                        try store.upsertRuntimeSessionBinding(
+                            binding
+                        )
                         try store.appendEvent(
                             LedgerEvent(
+                                projectID: kernel.project.id,
+                                actorID: kernel.actor?.id,
+                                principalID: kernel.principal?.id,
+                                workspaceID: kernel.workspace.id,
                                 taskID: stagedRun.taskID,
                                 runID: stagedRun.id,
                                 type: "codex.turn.started",
@@ -1005,8 +1540,19 @@ public final class ControlPlaneService: @unchecked Sendable {
                             )
                         )
                     }
+                    try self.recordContextDelivery(
+                        projectID: kernel.project.id,
+                        packID: contextPack.id,
+                        status: .delivered,
+                        adapterReceiptMaterial:
+                            "codex-app-server|\(threadID)|\(turnID)"
+                    )
+                },
+                onVisibleText: { text in
+                    mirror.offer(text)
                 }
             )
+            mirror.finish(result.output)
 
             guard var run = try store.fetchRun(id: runID) else {
                 throw MuError.recordNotFound("Run \(runID)")
@@ -1032,33 +1578,71 @@ public final class ControlPlaneService: @unchecked Sendable {
             let now = Date()
             run.updatedAt = now
             task.updatedAt = now
+            var binding = try store.fetchRuntimeSessionBinding(
+                id: bindingID
+            )
+            binding?.state = result.status == "completed"
+                ? .completed
+                : result.status == "interrupted"
+                    ? .disconnected
+                    : .failed
+            binding?.lastActivitySummary =
+                result.status == "completed"
+                ? "Codex completed the native turn."
+                : "Codex ended with status \(result.status)."
+            binding?.lastError = result.errorMessage
+            binding?.updatedAt = now
 
-            let outputReference: (uri: String, sha256: String)?
-            if result.output.isEmpty {
-                outputReference = nil
-            } else {
-                outputReference = try artifactStore.put(Data(result.output.utf8))
-            }
-            let chatEntry = result.output.isEmpty
+            let projectArtifact =
+                result.output.isEmpty
                 ? nil
-                : ChatEntry(
+                : try submitRuntimeOutputArtifact(
                     taskID: task.id,
-                    agentIdentityID: agent?.id,
-                    authorKind: .agent,
-                    authorName: agent?.displayName ?? endpoint.displayName,
-                    text: result.output
+                    producerActorID: kernel.actor?.id,
+                    title: "Codex result · \(task.title)",
+                    output: result.output,
+                    metadata: [
+                        "provider":
+                            ConversationProvider.codex.rawValue,
+                        "native_thread_id": result.threadID,
+                        "native_turn_id": result.turnID
+                    ]
                 )
+            var chatEntry =
+                try store.fetchChatEntry(
+                    id: responseEntry.id
+                ) ?? responseEntry
+            chatEntry.text = result.output.isEmpty
+                ? "Codex ended with status \(result.status)."
+                : result.output
+            chatEntry.deliveryState =
+                result.status == "completed"
+                ? .mirrored
+                : result.status == "interrupted"
+                    ? .cancelled
+                    : result.status == "failed"
+                        ? .failed
+                        : .ambiguous
+            chatEntry.updatedAt = now
             try store.withTransaction {
                 guard try store.fetchRegisteredEndpoint(id: endpoint.id) != nil else {
                     throw MuError.recordNotFound("Codex App Server endpoint")
                 }
                 try store.upsertRun(run)
                 try store.upsertTask(task)
-                if let chatEntry {
-                    try store.insertChatEntry(chatEntry)
+                if let binding {
+                    try store.upsertRuntimeSessionBinding(
+                        binding
+                    )
                 }
+                try store.upsertChatEntry(chatEntry)
                 try store.appendEvent(
                     LedgerEvent(
+                        projectID: kernel.project.id,
+                        actorID: kernel.actor?.id,
+                        principalID: kernel.principal?.id,
+                        workspaceID: kernel.workspace.id,
+                        artifactID: projectArtifact?.id,
                         taskID: task.id,
                         runID: run.id,
                         type: "codex.turn.completed",
@@ -1070,13 +1654,16 @@ public final class ControlPlaneService: @unchecked Sendable {
                             "native_turn_id": result.turnID,
                             "native_status": result.status,
                             "history_reconciled": String(result.historyReconciled),
-                            "output_uri": outputReference?.uri ?? "",
-                            "output_sha256": outputReference?.sha256 ?? "",
+                            "output_uri":
+                                projectArtifact?.uri ?? "",
+                            "output_sha256":
+                                projectArtifact?.sha256 ?? "",
                             "error": result.errorMessage ?? ""
                         ]
                     )
                 )
             }
+            _ = try? releaseTaskLease(id: lease.id)
             return result
         } catch {
             if var run = try? store.fetchRun(id: runID),
@@ -1087,11 +1674,57 @@ public final class ControlPlaneService: @unchecked Sendable {
                 let now = Date()
                 run.updatedAt = now
                 failedTask.updatedAt = now
+                var failedBinding:
+                    RuntimeSessionBinding?
+                failedBinding =
+                    try? store.fetchRuntimeSessionBinding(
+                        id: bindingID
+                    )
+                if var binding = failedBinding {
+                    binding.state = .failed
+                    binding.lastError =
+                        error.localizedDescription
+                    binding.lastActivitySummary =
+                        "Codex dispatch failed."
+                    binding.updatedAt = now
+                    failedBinding = binding
+                }
+                var failedEntry =
+                    try? store.fetchChatEntry(
+                        id: responseEntry.id
+                    )
+                if var entry = failedEntry {
+                    entry.deliveryState =
+                        hasNativeIdentity
+                        ? .ambiguous
+                        : .failed
+                    entry.text = hasNativeIdentity
+                        ? "Codex stopped after creating native state: "
+                            + error.localizedDescription
+                        : "Codex failed: "
+                            + error.localizedDescription
+                    entry.updatedAt = now
+                    failedEntry = entry
+                }
                 try? store.withTransaction {
                     try store.upsertRun(run)
                     try store.upsertTask(failedTask)
+                    if let binding = failedBinding {
+                        try store.upsertRuntimeSessionBinding(
+                            binding
+                        )
+                    }
+                    if let failedEntry {
+                        try store.upsertChatEntry(
+                            failedEntry
+                        )
+                    }
                     try store.appendEvent(
                         LedgerEvent(
+                            projectID: kernel.project.id,
+                            actorID: kernel.actor?.id,
+                            principalID: kernel.principal?.id,
+                            workspaceID: kernel.workspace.id,
                             taskID: failedTask.id,
                             runID: run.id,
                             type: "codex.task.failed",
@@ -1108,6 +1741,13 @@ public final class ControlPlaneService: @unchecked Sendable {
                     )
                 }
             }
+            _ = try? recordContextDelivery(
+                projectID: kernel.project.id,
+                packID: contextPack.id,
+                status: .failed,
+                failureCode: "codex_runtime_dispatch_failed"
+            )
+            _ = try? releaseTaskLease(id: lease.id)
             throw error
         }
     }
@@ -1294,6 +1934,12 @@ public final class ControlPlaneService: @unchecked Sendable {
                 "The source endpoint does not expose a verified Start capability."
             )
         }
+        if RuntimeGatewayRegistry.adapter(for: endpoint) != nil {
+            try RuntimeGatewayRegistry.require(
+                .createSession,
+                endpoint: endpoint
+            )
+        }
         let agent: AgentIdentity?
         if let agentIdentityID {
             guard let registeredAgent = try store.fetchAgent(id: agentIdentityID) else {
@@ -1304,12 +1950,13 @@ public final class ControlPlaneService: @unchecked Sendable {
             agent = nil
         }
 
-        let run = RunRecord(
+        var run = RunRecord(
             taskID: UUID(),
             endpointID: sourceEndpointID,
             actorName: agent?.displayName ?? endpoint.displayName,
             purpose: .execution,
             state: endpoint.runtimeTypeID == Self.codexRuntimeTypeID
+                || endpoint.runtimeTypeID == Self.claudeCodeRuntimeTypeID
                 || endpoint.runtimeTypeID == Self.openWorkerRuntimeTypeID
                 ? .starting
                 : .active,
@@ -1339,6 +1986,17 @@ public final class ControlPlaneService: @unchecked Sendable {
             assignmentText =
                 "Task queued through \(endpoint.displayName). A read-only native Codex thread "
                 + "and turn will be dispatched and recorded as runtime evidence."
+        } else if endpoint.runtimeTypeID == Self.claudeCodeRuntimeTypeID,
+                  let agent {
+            assignmentText =
+                "\(agent.displayName) is assigned through \(endpoint.displayName). "
+                + "Mu will launch a read-only Claude Code CLI session, mirror visible "
+                + "stream-json output, and preserve its session receipt."
+        } else if endpoint.runtimeTypeID
+                    == Self.claudeCodeRuntimeTypeID {
+            assignmentText =
+                "Task queued through \(endpoint.displayName). Mu will launch a "
+                + "read-only native CLI session and preserve its session receipt."
         } else if endpoint.runtimeTypeID == Self.openWorkerRuntimeTypeID, let agent {
             assignmentText =
                 "\(agent.displayName) is assigned through \(endpoint.displayName). "
@@ -1387,11 +2045,24 @@ public final class ControlPlaneService: @unchecked Sendable {
                     projectPreferenceToRestore
                 )
             }
+            let link = try attachTaskToProjectKernel(
+                task: &task,
+                endpoint: endpoint
+            )
+            let kernel = try projectKernelContext(taskID: task.id)
+            run.projectID = link.projectID
+            run.workspaceID = link.workspaceID
+            run.actorID = link.assignedToActorID
+            run.principalID = kernel.principal?.id
             try store.upsertTask(task)
             try store.upsertRun(run)
             try store.insertChatEntry(assignmentEntry)
             try store.appendEvent(
                 LedgerEvent(
+                    projectID: link.projectID,
+                    actorID: link.requestedByActorID,
+                    principalID: Self.localOwnerPrincipalID,
+                    workspaceID: link.workspaceID,
                     taskID: task.id,
                     runID: run.id,
                     type: "task.created",
@@ -1405,11 +2076,17 @@ public final class ControlPlaneService: @unchecked Sendable {
             )
             try store.appendEvent(
                 LedgerEvent(
+                    projectID: link.projectID,
+                    actorID: link.assignedToActorID,
+                    principalID: kernel.principal?.id,
+                    workspaceID: link.workspaceID,
                     taskID: task.id,
                     runID: run.id,
                     type: "run.started",
                     summary: endpoint.runtimeTypeID == Self.codexRuntimeTypeID
                         ? "Queued the initial read-only Codex execution Run."
+                        : endpoint.runtimeTypeID == Self.claudeCodeRuntimeTypeID
+                            ? "Queued the initial read-only Claude Code execution Run."
                         : endpoint.runtimeTypeID == Self.openWorkerRuntimeTypeID
                             ? "Queued the initial native OpenWorker execution Run."
                             : "Started the initial execution Run.",
@@ -1417,6 +2094,8 @@ public final class ControlPlaneService: @unchecked Sendable {
                         "purpose": run.purpose.rawValue,
                         "dispatch_mode": endpoint.runtimeTypeID == Self.codexRuntimeTypeID
                             ? "native_read_only"
+                            : endpoint.runtimeTypeID == Self.claudeCodeRuntimeTypeID
+                                ? "managed_cli_read_only"
                             : endpoint.runtimeTypeID == Self.openWorkerRuntimeTypeID
                                 ? "native_session"
                             : "fixture_or_external"
@@ -1481,24 +2160,29 @@ public final class ControlPlaneService: @unchecked Sendable {
                 "\(endpoint.displayName) is not active. Probe it before routing a message."
             )
         }
-        guard endpoint.capabilities.contains(.continueRun),
-              endpoint.capabilities.contains(.streamEvents) else {
-            throw MuError.capabilityMissing(
-                "\(endpoint.displayName) does not expose verified Workspace Chat continuation."
-            )
-        }
-        guard endpoint.runtimeTypeID == Self.openWorkerRuntimeTypeID else {
-            throw MuError.capabilityMissing(
-                "@\(route.mention) resolved to \(endpoint.displayName), but this Mu build "
-                + "does not expose that Runtime's chat continuation adapter."
-            )
-        }
+        try RuntimeGatewayRegistry.require(
+            .submitInput,
+            endpoint: endpoint
+        )
+        try RuntimeGatewayRegistry.require(
+            .observeEvents,
+            endpoint: endpoint
+        )
+        let isOpenWorker =
+            endpoint.runtimeTypeID
+            == Self.openWorkerRuntimeTypeID
 
         let binding = try currentRuntimeSessionBinding(
             taskID: taskID,
             endpointID: endpoint.id,
             agentIdentityID: route.agentIdentityID
         )
+        if !isOpenWorker, binding == nil {
+            throw MuError.invalidTransition(
+                "\(endpoint.displayName) has no resumable native session "
+                    + "for this Task. Complete its initial Project Run first."
+            )
+        }
         if let binding,
            binding.state == .working || binding.state == .awaitingApproval {
             throw MuError.invalidTransition(
@@ -1507,9 +2191,53 @@ public final class ControlPlaneService: @unchecked Sendable {
             )
         }
 
+        let link = try store.fetchTaskProjectLink(
+            taskID: taskID
+        )
+        let actorID =
+            route.agentIdentityID.map {
+                ProjectActorRecord
+                    .stableAgentIdentityActorID(
+                        agentIdentityID: $0
+                    )
+            }
+            ?? ProjectActorRecord.stableRuntimeActorID(
+                endpointID: endpoint.id
+            )
+        let routedActorID =
+            binding?.actorID ?? actorID
+        try authorizeTaskActor(
+            taskID: taskID,
+            actorID: routedActorID,
+            endpointID: endpoint.id
+        )
         let run: RunRecord
         let shouldInsertRun: Bool
-        if let binding,
+        if let binding {
+            let agent = route.agentIdentityID.flatMap { id in
+                agents.first { $0.id == id }
+            }
+            run = RunRecord(
+                taskID: taskID,
+                projectID:
+                    link?.projectID ?? task.projectID,
+                workspaceID:
+                    link?.workspaceID ?? task.workspaceID,
+                actorID: routedActorID,
+                principalID:
+                    link?.costOwnerPrincipalID,
+                endpointID: endpoint.id,
+                actorName:
+                    agent?.displayName
+                    ?? endpoint.displayName,
+                purpose: .delegation,
+                state: .starting,
+                nativeThreadID:
+                    binding.nativeSessionID,
+                agentIdentityID: agent?.id
+            )
+            shouldInsertRun = true
+        } else if let binding,
            let runID = binding.runID,
            let existingRun = try store.fetchRun(id: runID),
            existingRun.endpointID == endpoint.id,
@@ -1545,7 +2273,10 @@ public final class ControlPlaneService: @unchecked Sendable {
             runtimeSessionBindingID: binding?.id,
             nativeMessageIndexLowerBound:
                 binding?.lastSyncedMessageCount,
-            deliveryState: binding == nil ? .awaitingSession : .queued,
+            deliveryState:
+                binding == nil
+                ? .awaitingSession
+                : .queued,
             routedText: route.prompt,
             authorKind: .user,
             authorName: "You",
@@ -1558,6 +2289,14 @@ public final class ControlPlaneService: @unchecked Sendable {
             try store.insertChatEntry(entry)
             try store.appendEvent(
                 LedgerEvent(
+                    projectID:
+                        link?.projectID ?? task.projectID,
+                    actorID: routedActorID,
+                    principalID:
+                        link?.costOwnerPrincipalID,
+                    workspaceID:
+                        link?.workspaceID
+                        ?? task.workspaceID,
                     taskID: taskID,
                     runID: run.id,
                     type: binding == nil
@@ -1565,7 +2304,9 @@ public final class ControlPlaneService: @unchecked Sendable {
                         : "runtime.message.queued",
                     summary: binding == nil
                         ? "Workspace message is waiting for an explicit OpenWorker session link."
-                        : "Queued a Workspace message for OpenWorker session \(binding!.nativeSessionID).",
+                        : "Queued a bounded Workspace message for "
+                            + "\(endpoint.displayName) session "
+                            + "\(binding!.nativeSessionID).",
                     payload: [
                         "chat_entry_id": entry.id.uuidString,
                         "endpoint_id": endpoint.id.uuidString,
@@ -1627,7 +2368,7 @@ public final class ControlPlaneService: @unchecked Sendable {
         chatEntryID: UUID? = nil,
         existingSession: OpenWorkerSessionSummary? = nil
     ) throws -> RuntimeSessionBinding {
-        guard let task = try store.fetchTask(id: taskID) else {
+        guard var task = try store.fetchTask(id: taskID) else {
             throw MuError.recordNotFound("Task \(taskID)")
         }
         let endpoint = try activeOpenWorkerEndpoint()
@@ -1639,8 +2380,18 @@ public final class ControlPlaneService: @unchecked Sendable {
             ?? task.assignedAgentIdentityID.flatMap { id in
                 (try? store.fetchAgent(id: id))?.preferredEndpointID == endpoint.id ? id : nil
             }
+        let actorID =
+            agentID.map {
+                ProjectActorRecord
+                    .stableAgentIdentityActorID(
+                        agentIdentityID: $0
+                    )
+            }
+            ?? ProjectActorRecord.stableRuntimeActorID(
+                endpointID: endpoint.id
+            )
         let runID: UUID
-        let runToInsert: RunRecord?
+        var runToInsert: RunRecord?
         if let entryRunID = pendingEntry?.runID,
            let entryRun = try store.fetchRun(id: entryRunID),
            entryRun.endpointID == endpoint.id,
@@ -1719,8 +2470,48 @@ public final class ControlPlaneService: @unchecked Sendable {
                 "OpenWorker session workspace is not an accessible directory."
             )
         }
+        try authorizeTaskActor(
+            taskID: taskID,
+            actorID: actorID,
+            endpointID: endpoint.id
+        )
+        let kernel = try projectKernelContext(
+            taskID: taskID
+        )
+        let actor = try store.fetchProjectActor(
+            id: actorID
+        )
+        let principal = try actor.flatMap {
+            try store.fetchPrincipal(
+                id: $0.principalID
+            )
+        }
+        var lease = try claimTaskLease(
+            taskID: taskID,
+            endpointID: endpoint.id,
+            actorID: actorID,
+            duration: 30 * 60
+        )
+        let persistedRun = try store.fetchRun(
+            id: runID
+        )
+        if var stagedRun =
+            runToInsert ?? persistedRun {
+            stagedRun.projectID = kernel.project.id
+            stagedRun.workspaceID = kernel.workspace.id
+            stagedRun.actorID = actorID
+            stagedRun.principalID = principal?.id
+            stagedRun.taskLeaseID = lease.id
+            runToInsert = stagedRun
+        }
+        var taskLink = try store.fetchTaskProjectLink(
+            taskID: taskID
+        )
+        taskLink?.assignedToActorID = actorID
+        taskLink?.workspaceID = kernel.workspace.id
+        taskLink?.updatedAt = Date()
         let allBindings = try store.fetchRuntimeSessionBindings()
-        if let existingBinding = allBindings.first(where: {
+        if var existingBinding = allBindings.first(where: {
             $0.endpointID == endpoint.id
                 && $0.nativeSessionID == nativeSessionID
                 && $0.taskID == taskID
@@ -1732,6 +2523,22 @@ public final class ControlPlaneService: @unchecked Sendable {
                     + "Task. Choose or create a session for the mentioned Agent."
                 )
             }
+            existingBinding.projectID = kernel.project.id
+            existingBinding.workspaceID =
+                kernel.workspace.id
+            existingBinding.actorID = actorID
+            existingBinding.principalID = principal?.id
+            existingBinding.taskLeaseID = lease.id
+            existingBinding.runID = runID
+            existingBinding.updatedAt = Date()
+            lease.runtimeBindingID = existingBinding.id
+            task.projectID = kernel.project.id
+            task.workspaceID = kernel.workspace.id
+            task.assignedActorID = actorID
+            task.currentEndpointID = endpoint.id
+            task.currentRunID = runID
+            task.status = .running
+            task.updatedAt = Date()
             if var pendingEntry {
                 pendingEntry.runID = existingBinding.runID
                 pendingEntry.runtimeSessionBindingID = existingBinding.id
@@ -1740,6 +2547,19 @@ public final class ControlPlaneService: @unchecked Sendable {
                 pendingEntry.deliveryState = .queued
                 pendingEntry.updatedAt = Date()
                 try store.withTransaction {
+                    if let runToInsert {
+                        try store.upsertRun(runToInsert)
+                    }
+                    try store.upsertTask(task)
+                    if let taskLink {
+                        try store.upsertTaskProjectLink(
+                            taskLink
+                        )
+                    }
+                    try store.upsertTaskLease(lease)
+                    try store.upsertRuntimeSessionBinding(
+                        existingBinding
+                    )
                     try store.upsertChatEntry(pendingEntry)
                     try store.appendEvent(
                         LedgerEvent(
@@ -1754,6 +2574,22 @@ public final class ControlPlaneService: @unchecked Sendable {
                                 "chat_entry_id": pendingEntry.id.uuidString
                             ]
                         )
+                    )
+                }
+            } else {
+                try store.withTransaction {
+                    if let runToInsert {
+                        try store.upsertRun(runToInsert)
+                    }
+                    try store.upsertTask(task)
+                    if let taskLink {
+                        try store.upsertTaskProjectLink(
+                            taskLink
+                        )
+                    }
+                    try store.upsertTaskLease(lease)
+                    try store.upsertRuntimeSessionBinding(
+                        existingBinding
                     )
                 }
             }
@@ -1775,6 +2611,11 @@ public final class ControlPlaneService: @unchecked Sendable {
             endpoint.nativeConfiguration?["connection_mode"] ?? "legacy_loopback"
         let binding = RuntimeSessionBinding(
             taskID: taskID,
+            projectID: kernel.project.id,
+            workspaceID: kernel.workspace.id,
+            actorID: actorID,
+            principalID: principal?.id,
+            taskLeaseID: lease.id,
             runID: runID,
             endpointID: endpoint.id,
             agentIdentityID: agentID,
@@ -1789,6 +2630,14 @@ public final class ControlPlaneService: @unchecked Sendable {
                 ? "Native OpenWorker session prepared."
                 : "Existing OpenWorker session linked."
         )
+        lease.runtimeBindingID = binding.id
+        task.projectID = kernel.project.id
+        task.workspaceID = kernel.workspace.id
+        task.assignedActorID = actorID
+        task.currentEndpointID = endpoint.id
+        task.currentRunID = runID
+        task.status = .running
+        task.updatedAt = Date()
         var oldBindings = try store.fetchRuntimeSessionBindings(taskID: taskID).filter {
             $0.endpointID == endpoint.id
                 && $0.agentIdentityID == agentID
@@ -1822,12 +2671,21 @@ public final class ControlPlaneService: @unchecked Sendable {
             if let runToInsert {
                 try store.upsertRun(runToInsert)
             }
+            try store.upsertTask(task)
+            if let taskLink {
+                try store.upsertTaskProjectLink(taskLink)
+            }
+            try store.upsertTaskLease(lease)
             try store.upsertRuntimeSessionBinding(binding)
             for entry in entriesToUpdate {
                 try store.upsertChatEntry(entry)
             }
             try store.appendEvent(
                 LedgerEvent(
+                    projectID: kernel.project.id,
+                    actorID: actorID,
+                    principalID: principal?.id,
+                    workspaceID: kernel.workspace.id,
                     taskID: taskID,
                     runID: runID,
                     type: existingSession == nil
@@ -1919,70 +2777,98 @@ public final class ControlPlaneService: @unchecked Sendable {
                 "The queued message no longer targets the active OpenWorker adapter."
             )
         }
-        let contextClaim = try importedContextClaim(
-            entry: entry,
-            binding: binding
-        )
-        let dispatchPayload =
-            contextClaim?.routedText
-                ?? entry.routedText
-                ?? entry.text
-        if let contextClaim {
-            entry.contextFreeRoutedText = entry.routedText ?? entry.text
-            entry.contextSnapshotID = contextClaim.snapshot.id
-            entry.routedText = entry.contextFreeRoutedText
+        guard var task = try store.fetchTask(id: entry.taskID),
+              WorkspacePathIdentity.isExactMatch(
+                  binding.workspacePath,
+                  task.repositoryPath
+              ) else {
+            throw MuError.invalidTransition(
+                "OpenWorker binding belongs to another workspace and requires relinking."
+            )
         }
+        guard let actorID = binding.actorID,
+              let dispatchRunID =
+                entry.runID ?? binding.runID,
+              var run = try store.fetchRun(
+                  id: dispatchRunID
+              ) else {
+            throw MuError.invalidTransition(
+                "OpenWorker has no authorized Actor or persisted Run."
+            )
+        }
+        var lease: TaskLeaseRecord
+        if let leaseID = binding.taskLeaseID,
+           let currentLease = try store.fetchTaskLease(
+               id: leaseID
+           ),
+           currentLease.isActive(),
+           currentLease.agentActorID == actorID,
+           currentLease.endpointID == endpoint.id {
+            lease = try renewTaskLease(
+                id: currentLease.id,
+                duration: 30 * 60
+            )
+        } else {
+            lease = try claimTaskLease(
+                taskID: entry.taskID,
+                endpointID: endpoint.id,
+                actorID: actorID,
+                runtimeBindingID: binding.id,
+                duration: 30 * 60
+            )
+        }
+        if lease.runtimeBindingID != binding.id {
+            lease.runtimeBindingID = binding.id
+            try store.upsertTaskLease(lease)
+        }
+        let contextPack = try buildGovernedContextPack(
+            taskID: entry.taskID,
+            actorID: actorID,
+            endpointID: endpoint.id,
+            runtimeBindingID: binding.id,
+            taskLeaseID: lease.id
+        )
+        let currentMessage =
+            entry.routedText
+            ?? entry.text
+        let dispatchPayload =
+            contextPack.renderedMarkdown
+            + "\n\n# Current Project message\n\n"
+            + currentMessage
         entry.nativeMessageIndexLowerBound = max(
             entry.nativeMessageIndexLowerBound ?? 0,
             binding.lastSyncedMessageCount
         )
         entry.deliveryState = .sending
+        entry.runID = run.id
         entry.updatedAt = Date()
         binding.state = .connecting
+        binding.taskLeaseID = lease.id
+        binding.runID = run.id
+        binding.contextPackID = contextPack.id
         binding.lastActivitySummary = "Sending a Workspace message to OpenWorker."
         binding.lastError = nil
         binding.updatedAt = Date()
+        run.projectID = binding.projectID
+        run.workspaceID = binding.workspaceID
+        run.actorID = actorID
+        run.principalID = binding.principalID
+        run.taskLeaseID = lease.id
+        run.contextPackID = contextPack.id
+        run.state = .starting
+        run.updatedAt = Date()
+        task.projectID = binding.projectID
+        task.workspaceID = binding.workspaceID
+        task.assignedActorID = actorID
+        task.currentEndpointID = endpoint.id
+        task.currentRunID = run.id
+        task.status = .running
+        task.updatedAt = Date()
         try store.withTransaction {
-            if let contextClaim {
-                try store.insertContextSnapshot(contextClaim.snapshot)
-                try store.appendEvent(
-                    LedgerEvent(
-                        taskID: entry.taskID,
-                        runID: entry.runID,
-                        type: "context.snapshot.claimed",
-                        summary:
-                            "Attached reviewed imported history to the first "
-                            + "cross-agent message for this native session.",
-                        payload: [
-                            "chat_entry_id": entry.id.uuidString,
-                            "binding_id": binding.id.uuidString,
-                            "context_snapshot_id":
-                                contextClaim.snapshot.id.uuidString,
-                            "content_sha256":
-                                contextClaim.snapshot.contentSHA256,
-                            "utf8_byte_count":
-                                String(contextClaim.snapshot.utf8ByteCount),
-                            "included_message_count":
-                                String(
-                                    contextClaim.snapshot
-                                        .includedMessageIDs.count
-                                ),
-                            "omitted_message_count":
-                                String(
-                                    contextClaim.snapshot
-                                        .omittedMessageCount
-                                ),
-                            "truncated_message_count":
-                                String(
-                                    contextClaim.snapshot
-                                        .truncatedMessageCount
-                                )
-                        ]
-                    )
-                )
-            }
             try store.upsertChatEntry(entry)
             try store.upsertRuntimeSessionBinding(binding)
+            try store.upsertRun(run)
+            try store.upsertTask(task)
             try store.appendEvent(
                 LedgerEvent(
                     taskID: entry.taskID,
@@ -1992,9 +2878,18 @@ public final class ControlPlaneService: @unchecked Sendable {
                     payload: [
                         "chat_entry_id": entry.id.uuidString,
                         "binding_id": binding.id.uuidString,
-                        "native_session_id": binding.nativeSessionID
+                        "native_session_id": binding.nativeSessionID,
+                        "context_pack_id":
+                            contextPack.id.uuidString
                     ]
                 )
+            )
+            try recordContextDelivery(
+                projectID:
+                    binding.projectID
+                    ?? contextPack.projectID,
+                packID: contextPack.id,
+                status: .prepared
             )
         }
         return dispatchPayload
@@ -2060,6 +2955,14 @@ public final class ControlPlaneService: @unchecked Sendable {
                         "error": error.localizedDescription
                     ]
                 )
+            )
+        }
+        if let binding {
+            try finalizeOpenWorkerContextDeliveryIfNeeded(
+                binding: binding,
+                status: .failed,
+                failureCode:
+                    "openworker_send_failed_before_ack"
             )
         }
     }
@@ -2193,6 +3096,34 @@ public final class ControlPlaneService: @unchecked Sendable {
         default:
             break
         }
+        if var proposedInteraction = interaction,
+           proposedInteraction.projectApprovalID == nil {
+            _ = try createProjectApproval(
+                interaction: &proposedInteraction,
+                requestedByActorID: binding.actorID,
+                scope:
+                    "openworker."
+                    + proposedInteraction.kind.rawValue
+            )
+            interaction = proposedInteraction
+        }
+        if let leaseID = binding.taskLeaseID {
+            if event.type == "connection_closed" {
+                _ = try? releaseTaskLease(
+                    id: leaseID
+                )
+            } else if [
+                "ready",
+                "turn_start",
+                "tool_started",
+                "turn_done"
+            ].contains(event.type) {
+                _ = try? renewTaskLease(
+                    id: leaseID,
+                    duration: 30 * 60
+                )
+            }
+        }
         binding.lastActivitySummary = event.summary
         binding.updatedAt = now
         run?.updatedAt = now
@@ -2264,6 +3195,13 @@ public final class ControlPlaneService: @unchecked Sendable {
             }
             try store.appendEvent(
                 LedgerEvent(
+                    projectID: binding.projectID,
+                    actorID: binding.actorID,
+                    principalID: binding.principalID,
+                    workspaceID: binding.workspaceID,
+                    approvalID:
+                        interaction?
+                        .projectApprovalID,
                     taskID: binding.taskID,
                     runID: binding.runID,
                     type: "openworker.\(event.type)",
@@ -2271,6 +3209,31 @@ public final class ControlPlaneService: @unchecked Sendable {
                     payload: openWorkerLedgerPayload(binding: binding, event: event)
                 )
             )
+        }
+        switch event.type {
+        case "turn_start", "assistant_message", "turn_done":
+            try finalizeOpenWorkerContextDeliveryIfNeeded(
+                binding: binding,
+                status: .delivered,
+                adapterReceiptMaterial:
+                    "openworker|\(binding.nativeSessionID)|\(event.type)|"
+                    + (event.data["turn_id"]?.stringValue ?? "")
+            )
+        case "input_rejected":
+            try finalizeOpenWorkerContextDeliveryIfNeeded(
+                binding: binding,
+                status: .failed,
+                failureCode: "openworker_input_rejected"
+            )
+        case "connection_closed":
+            try finalizeOpenWorkerContextDeliveryIfNeeded(
+                binding: binding,
+                status: .failed,
+                failureCode:
+                    "openworker_connection_closed_before_ack"
+            )
+        default:
+            break
         }
         return interaction
     }
@@ -2328,6 +3291,12 @@ public final class ControlPlaneService: @unchecked Sendable {
                 )
             )
         }
+        try finalizeOpenWorkerContextDeliveryIfNeeded(
+            binding: binding,
+            status: .failed,
+            failureCode:
+                "openworker_connection_failed_before_ack"
+        )
     }
 
     public func resolveRuntimeInteraction(
@@ -2340,10 +3309,40 @@ public final class ControlPlaneService: @unchecked Sendable {
         }
         request.state = state
         request.resolvedAt = Date()
+        var projectApproval =
+            try request.projectApprovalID.flatMap {
+                approvalID in
+                try store.fetchProjectApprovals()
+                    .first {
+                        $0.id == approvalID
+                    }
+            }
+        if projectApproval?.decision == .pending {
+            switch state {
+            case .approved, .answered:
+                projectApproval?.decision = .granted
+            case .denied:
+                projectApproval?.decision = .denied
+            case .superseded:
+                projectApproval?.decision = .expired
+            case .pending:
+                break
+            }
+            if projectApproval?.decision != .pending {
+                projectApproval?.resolvedAt = Date()
+            }
+        }
         try store.withTransaction {
             try store.upsertRuntimeInteraction(request)
+            if let projectApproval {
+                try store.upsertProjectApproval(
+                    projectApproval
+                )
+            }
             try store.appendEvent(
                 LedgerEvent(
+                    projectID: projectApproval?.projectID,
+                    approvalID: projectApproval?.id,
                     taskID: request.taskID,
                     type: "runtime.interaction.resolved",
                     summary: "Resolved OpenWorker \(request.kind.rawValue) as \(state.rawValue).",
@@ -2811,6 +3810,66 @@ public final class ControlPlaneService: @unchecked Sendable {
                 )
             )
         }
+        var projectArtifactRecords:
+            [ProjectArtifactRecord] = []
+        if let projectID = binding.projectID {
+            for index in artifactRecords.indices {
+                guard let absolutePath =
+                    artifactRecords[index].absolutePath,
+                      artifactRecords[index].byteCount
+                        <= 64 * 1_024 * 1_024,
+                      let data = try? Data(
+                          contentsOf: URL(
+                              fileURLWithPath: absolutePath
+                          ),
+                          options: .mappedIfSafe
+                      ),
+                      let reference =
+                        try? artifactStore.put(data)
+                else {
+                    continue
+                }
+                let projectArtifact =
+                    ProjectArtifactRecord(
+                        projectID: projectID,
+                        taskID: binding.taskID,
+                        producerActorID:
+                            binding.actorID,
+                        kind: Self.projectArtifactKind(
+                            openWorkerKind:
+                                artifactRecords[index]
+                                .kind
+                        ),
+                        title:
+                            "OpenWorker · "
+                            + artifactRecords[index].name,
+                        uri: reference.uri,
+                        sha256: reference.sha256,
+                        status: .submitted,
+                        metadata: [
+                            "provider":
+                                ConversationProvider
+                                .openWorker.rawValue,
+                            "native_session_id":
+                                binding.nativeSessionID,
+                            "relative_path":
+                                artifactRecords[index]
+                                .relativePath,
+                            "byte_count":
+                                String(
+                                    artifactRecords[index]
+                                    .byteCount
+                                )
+                        ]
+                    )
+                artifactRecords[index]
+                    .projectArtifactID =
+                    projectArtifact.id
+                projectArtifactRecords.append(
+                    projectArtifact
+                )
+            }
+        }
 
         let existingInteractions = try store.fetchRuntimeInteractions(taskID: binding.taskID)
             .filter { $0.bindingID == binding.id }
@@ -2853,6 +3912,21 @@ public final class ControlPlaneService: @unchecked Sendable {
             resolved.state = .superseded
             resolved.resolvedAt = Date()
             interactionRecords.append(resolved)
+        }
+        for index in interactionRecords.indices
+            where interactionRecords[index].state == .pending
+                && interactionRecords[index]
+                    .projectApprovalID == nil {
+            _ = try createProjectApproval(
+                interaction:
+                    &interactionRecords[index],
+                requestedByActorID:
+                    binding.actorID,
+                scope:
+                    "openworker."
+                    + interactionRecords[index]
+                        .kind.rawValue
+            )
         }
 
         let bindingChangedBySync = previousBinding != binding
@@ -2932,6 +4006,9 @@ public final class ControlPlaneService: @unchecked Sendable {
             for artifact in artifactRecords {
                 try store.upsertRuntimeArtifact(artifact)
             }
+            for artifact in projectArtifactRecords {
+                try store.upsertProjectArtifact(artifact)
+            }
             for interaction in interactionRecords {
                 if let current = try store.fetchRuntimeInteraction(id: interaction.id),
                    current.state != .pending,
@@ -2946,6 +4023,10 @@ public final class ControlPlaneService: @unchecked Sendable {
             }
             try store.appendEvent(
                 LedgerEvent(
+                    projectID: binding.projectID,
+                    actorID: binding.actorID,
+                    principalID: binding.principalID,
+                    workspaceID: binding.workspaceID,
                     taskID: binding.taskID,
                     runID: binding.runID,
                     type: "runtime.session.synced",
@@ -2957,6 +4038,10 @@ public final class ControlPlaneService: @unchecked Sendable {
                         "new_chat_entries": String(entriesToUpsert.count),
                         "removed_duplicate_chat_entries": String(entryIDsToDelete.count),
                         "artifact_count": String(artifacts.count),
+                        "project_artifact_count":
+                            String(
+                                projectArtifactRecords.count
+                            ),
                         "pending_request_count": String(actionableInboxItems.count),
                         "updated_interactions": String(interactionRecords.count)
                     ]
@@ -2967,6 +4052,23 @@ public final class ControlPlaneService: @unchecked Sendable {
             binding: binding,
             didChange: true
         )
+    }
+
+    private static func projectArtifactKind(
+        openWorkerKind: String
+    ) -> ProjectArtifactKind {
+        switch openWorkerKind.lowercased() {
+        case "patch", "diff":
+            .patch
+        case "document", "markdown", "text":
+            .document
+        case "dataset", "csv", "json":
+            .dataset
+        case "test", "test_result", "report":
+            .testResult
+        default:
+            .runtimeOutput
+        }
     }
 
     @discardableResult
@@ -3300,6 +4402,44 @@ public final class ControlPlaneService: @unchecked Sendable {
         case "question": .question
         default: nil
         }
+    }
+
+    private func finalizeOpenWorkerContextDeliveryIfNeeded(
+        binding: RuntimeSessionBinding,
+        status: ContextDeliveryStatus,
+        adapterReceiptMaterial: String? = nil,
+        failureCode: String? = nil
+    ) throws {
+        guard status != .prepared,
+              let projectID = binding.projectID,
+              let packID = binding.contextPackID,
+              let runID = binding.runID else {
+            return
+        }
+        let receipts = try store.fetchContextDeliveries(
+            projectID: projectID,
+            taskID: binding.taskID
+        ).filter {
+            $0.contextPackID == packID
+                && $0.runtimeBindingID == binding.id
+                && $0.runID == runID
+        }
+        guard receipts.contains(where: {
+            $0.status == .prepared
+        }), !receipts.contains(where: {
+            $0.status == .delivered
+                || $0.status == .failed
+        }) else {
+            return
+        }
+        try recordContextDelivery(
+            projectID: projectID,
+            packID: packID,
+            status: status,
+            adapterReceiptMaterial:
+                adapterReceiptMaterial,
+            failureCode: failureCode
+        )
     }
 
     private func makeOpenWorkerInteraction(

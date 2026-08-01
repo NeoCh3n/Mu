@@ -33,8 +33,9 @@ public struct ProjectPreference: Identifiable, Codable, Hashable, Sendable {
 
 /// A repository-backed project and the tasks that belong to it.
 public struct ProjectGroup: Identifiable, Hashable, Sendable {
-    /// The canonical repository path is also the stable project identity.
-    public let id: String
+    /// Stable Mu-owned Project identity, independent from folder renames and
+    /// Agent-specific sessions.
+    public let id: UUID
     public let name: String
     public let repositoryPath: String
     public let tasks: [TaskRecord]
@@ -69,11 +70,13 @@ public struct ProjectGroup: Identifiable, Hashable, Sendable {
     }
 
     fileprivate init(
+        id: UUID,
         repositoryPath: String,
         displayName: String?,
-        tasks: [TaskRecord]
+        tasks: [TaskRecord],
+        projectUpdatedAt: Date? = nil
     ) {
-        self.id = repositoryPath
+        self.id = id
         self.repositoryPath = repositoryPath
 
         let folderName = URL(
@@ -88,7 +91,10 @@ public struct ProjectGroup: Identifiable, Hashable, Sendable {
             ? trimmedDisplayName!
             : defaultName
         self.tasks = tasks
-        self.updatedAt = tasks.map(\.updatedAt).max() ?? .distantPast
+        self.updatedAt = max(
+            tasks.map(\.updatedAt).max() ?? .distantPast,
+            projectUpdatedAt ?? .distantPast
+        )
     }
 }
 
@@ -98,7 +104,9 @@ public enum ProjectCatalog {
 
     public static func groups(
         from tasks: [TaskRecord],
-        preferences: [ProjectPreference] = []
+        preferences: [ProjectPreference] = [],
+        projects: [ProjectRecord] = [],
+        taskProjectLinks: [TaskProjectLink] = []
     ) -> [ProjectGroup] {
         let preferencesByRepository = preferences
             .sorted { $0.updatedAt < $1.updatedAt }
@@ -109,19 +117,65 @@ public enum ProjectCatalog {
                     )
                 ] = $1
             }
-        let tasksByRepository = Dictionary(grouping: tasks) {
-            WorkspacePathIdentity.canonicalPath($0.repositoryPath)
+
+        let projectsByID = Dictionary(
+            uniqueKeysWithValues: projects.map { ($0.id, $0) }
+        )
+        let linksByTaskID = Dictionary(
+            uniqueKeysWithValues: taskProjectLinks.map {
+                ($0.taskID, $0)
+            }
+        )
+        var tasksByProjectID: [UUID: [TaskRecord]] = [:]
+        var fallbackProjectPaths: [UUID: String] = [:]
+        for task in tasks {
+            let canonicalPath = WorkspacePathIdentity.canonicalPath(
+                task.repositoryPath
+            )
+            let linkedProjectID =
+                task.projectID
+                ?? linksByTaskID[task.id]?.projectID
+            let projectID: UUID
+            if let linkedProjectID,
+               projectsByID[linkedProjectID] != nil {
+                projectID = linkedProjectID
+            } else {
+                projectID = ProjectRecord.stableID(
+                    repositoryPath: canonicalPath
+                )
+                fallbackProjectPaths[projectID] = canonicalPath
+            }
+            tasksByProjectID[projectID, default: []].append(task)
         }
 
-        return tasksByRepository.compactMap {
-            repositoryPath,
-            repositoryTasks in
+        var visibleProjectIDs = Set(tasksByProjectID.keys)
+        visibleProjectIDs.formUnion(
+            projects.lazy.filter { $0.status == .active }.map(\.id)
+        )
+
+        return visibleProjectIDs.compactMap { projectID in
+            let project = projectsByID[projectID]
+            guard project?.status != .archived else { return nil }
+            let repositoryTasks = tasksByProjectID[projectID] ?? []
+            let repositoryPath =
+                project?.repositoryPath
+                ?? fallbackProjectPaths[projectID]
+                ?? repositoryTasks.first.map {
+                    WorkspacePathIdentity.canonicalPath(
+                        $0.repositoryPath
+                    )
+                }
+                ?? ""
             let preference = preferencesByRepository[repositoryPath]
             guard preference?.isRemoved != true else { return nil }
             return ProjectGroup(
+                id: projectID,
                 repositoryPath: repositoryPath,
-                displayName: preference?.displayName,
-                tasks: repositoryTasks.sorted(by: taskComesBefore)
+                displayName:
+                    project?.displayName
+                    ?? preference?.displayName,
+                tasks: repositoryTasks.sorted(by: taskComesBefore),
+                projectUpdatedAt: project?.updatedAt
             )
         }
         .sorted(by: projectComesBefore)
@@ -129,9 +183,16 @@ public enum ProjectCatalog {
 
     public static func projects(
         from tasks: [TaskRecord],
-        preferences: [ProjectPreference] = []
+        preferences: [ProjectPreference] = [],
+        projects: [ProjectRecord] = [],
+        taskProjectLinks: [TaskProjectLink] = []
     ) -> [Project] {
-        groups(from: tasks, preferences: preferences)
+        groups(
+            from: tasks,
+            preferences: preferences,
+            projects: projects,
+            taskProjectLinks: taskProjectLinks
+        )
     }
 
     private static func taskComesBefore(

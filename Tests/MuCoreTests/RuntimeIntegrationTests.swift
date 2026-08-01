@@ -127,6 +127,52 @@ struct RuntimeIntegrationTests {
         }.count == 1)
     }
 
+    @Test
+    func codexReadOnlyTaskMirrorsOnlyAgentMessageTextAndReconcilesFinalReceipt() throws {
+        let fake = try RuntimeFakeCodexAppServer(
+            threadID: "thread-visible-text",
+            turnID: "turn-visible-text",
+            streamedFinalAnswer: "STREAM_VISIBLE_FINAL",
+            persistedFinalAnswer: "PERSISTED_VISIBLE_FINAL",
+            emitsVisibleTextDeltas: true
+        )
+        defer { fake.remove() }
+
+        let task = TaskRecord(
+            title: "Codex visible text",
+            objective: "Mirror native visible text only.",
+            successCriteria: ["Use the persisted final receipt"],
+            constraints: ["Read only"],
+            pendingSteps: ["Observe the native stream"],
+            repositoryPath: fake.root.path,
+            currentEndpointID: UUID()
+        )
+        let callbacks = VisibleTextCollector()
+        let client = CodexAppServerClient(executableURL: fake.executableURL)
+        defer { client.stop() }
+
+        let result = try client.runReadOnlyTask(
+            task: task,
+            agent: nil,
+            clientUserMessageID: "mu-visible-\(UUID().uuidString)",
+            timeout: 5,
+            onVisibleText: { text in
+                callbacks.append(text)
+            }
+        )
+
+        let observedCallbacks = callbacks.values
+        #expect(Array(observedCallbacks.prefix(3)) == [
+            "Visible ",
+            "Visible stream",
+            "STREAM_VISIBLE_FINAL"
+        ])
+        #expect(observedCallbacks.allSatisfy { !$0.contains("PRIVATE") })
+        #expect(result.status == "completed")
+        #expect(result.historyReconciled)
+        #expect(result.output == "PERSISTED_VISIBLE_FINAL")
+    }
+
     @Test(arguments: ["completed", "failed", "interrupted", "cancelled"])
     func codexReadOnlyTaskFallsBackToPersistedTerminalTurnState(
         nativeStatus: String
@@ -247,6 +293,45 @@ struct RuntimeIntegrationTests {
         #expect(completedRun.nativeThreadID == "thread-e2e")
         #expect(completedRun.nativeTurnID == "turn-e2e")
         #expect(completedRun.nativeOutput == "MU_CODEX_E2E_OK")
+        let binding = try #require(
+            try service.store.fetchRuntimeSessionBindings(
+                taskID: task.id
+            ).first
+        )
+        let contextPackID = try #require(
+            completedRun.contextPackID
+        )
+        #expect(binding.contextPackID == contextPackID)
+        #expect(binding.runID == completedRun.id)
+        #expect(binding.nativeSessionID == "thread-e2e")
+        let kernel = try service.projectKernelContext(
+            taskID: task.id
+        )
+        let deliveryReceipts =
+            try service.store.fetchContextDeliveries(
+                projectID: kernel.project.id,
+                taskID: task.id
+            ).filter {
+                $0.contextPackID == contextPackID
+                    && $0.runtimeBindingID == binding.id
+                    && $0.runID == completedRun.id
+            }
+        #expect(
+            deliveryReceipts.contains {
+                $0.status == .prepared
+            }
+        )
+        #expect(
+            deliveryReceipts.contains {
+                $0.status == .delivered
+                    && $0.adapterReceiptSHA256 != nil
+            }
+        )
+        #expect(
+            deliveryReceipts.contains {
+                $0.status == .failed
+            } == false
+        )
 
         let chat = try service.store.fetchChatEntries(taskID: task.id)
         let agentReply = try #require(chat.last(where: { $0.authorKind == .agent }))
@@ -268,6 +353,23 @@ struct RuntimeIntegrationTests {
                 expectedSHA256: outputSHA256
             )
         )
+    }
+}
+
+private final class VisibleTextCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+
+    func append(_ text: String) {
+        lock.lock()
+        storage.append(text)
+        lock.unlock()
+    }
+
+    var values: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
     }
 }
 
@@ -348,7 +450,8 @@ private final class RuntimeFakeCodexAppServer {
         persistedFinalAnswer: String,
         completionNotificationStatus: String? = "completed",
         persistedTurnStatus: String = "completed",
-        persistedErrorMessage: String? = nil
+        persistedErrorMessage: String? = nil,
+        emitsVisibleTextDeltas: Bool = false
     ) throws {
         root = FileManager.default.temporaryDirectory.appending(
             path: "mu-runtime-fake-codex-\(UUID().uuidString)",
@@ -380,6 +483,19 @@ private final class RuntimeFakeCodexAppServer {
         } else {
             completionNotification = ":"
         }
+        let visibleTextNotifications: String
+        if emitsVisibleTextDeltas {
+            visibleTextNotifications =
+                """
+                sleep 0.1
+                printf '%s\\n' '{"method":"item/reasoning/delta","params":{"threadId":\(responseThreadID),"turnId":\(responseTurnID),"itemId":"reasoning-1","delta":"PRIVATE_REASONING"}}'
+                printf '%s\\n' '{"method":"item/tool/call","params":{"threadId":\(responseThreadID),"turnId":\(responseTurnID),"item":{"type":"toolCall","id":"tool-1","name":"PRIVATE_TOOL"}}}'
+                printf '%s\\n' '{"method":"item/agentMessage/delta","params":{"threadId":\(responseThreadID),"turnId":\(responseTurnID),"itemId":"stream-final","delta":"Visible "}}'
+                printf '%s\\n' '{"method":"item/agentMessage/delta","params":{"threadId":\(responseThreadID),"turnId":\(responseTurnID),"itemId":"stream-final","delta":"stream"}}'
+                """
+        } else {
+            visibleTextNotifications = ""
+        }
         let script =
             """
             #!/bin/sh
@@ -398,6 +514,7 @@ private final class RuntimeFakeCodexAppServer {
                   ;;
                 *'"id":4'*)
                   printf '%s\\n' '{"id":4,"result":{"turn":{"id":\(responseTurnID)}}}'
+                  \(visibleTextNotifications)
                   printf '%s\\n' '{"method":"item/completed","params":{"threadId":\(responseThreadID),"turnId":\(responseTurnID),"item":{"type":"agentMessage","id":"stream-final","text":\(streamFinal),"phase":"final_answer"}}}'
                   printf '%s\\n' '{"method":"item/completed","params":{"threadId":\(responseThreadID),"turnId":\(responseTurnID),"item":{"type":"agentMessage","id":"stream-tail","text":"STREAM_TAIL","phase":"commentary"}}}'
                   \(completionNotification)

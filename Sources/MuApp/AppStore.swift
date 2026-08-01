@@ -82,6 +82,9 @@ struct CreateAgentDraft {
 struct RegisterRuntimeDraft {
     var displayName = ""
     var runtimeTypeID = ""
+    var surfaceKind: AgentRuntimeSurfaceKind = .terminalCLI
+    var instanceLabel = ""
+    var terminalIdentifier = ""
     var location: EndpointLocation = .local
     var provenance: IntegrationProvenance = .vendorCLI
     var permissionModel: PermissionModel = .unknown
@@ -128,6 +131,19 @@ final class AppStore: ObservableObject {
     @Published var section: AppSection = .overview
     @Published var tasks: [TaskRecord] = []
     @Published var projectPreferences: [ProjectPreference] = []
+    @Published var projectRecords: [ProjectRecord] = []
+    @Published var principals: [PrincipalRecord] = []
+    @Published var projectActors: [ProjectActorRecord] = []
+    @Published var projectMemberships: [ProjectMembershipRecord] = []
+    @Published var delegations: [DelegationRecord] = []
+    @Published var projectWorkspaces: [ProjectWorkspaceRecord] = []
+    @Published var taskProjectLinks: [TaskProjectLink] = []
+    @Published var taskLeases: [TaskLeaseRecord] = []
+    @Published var projectArtifacts: [ProjectArtifactRecord] = []
+    @Published var projectReviews: [ProjectReviewRecord] = []
+    @Published var projectApprovals: [ProjectApprovalRecord] = []
+    @Published var runtimeAdapterRegistrations:
+        [RuntimeAdapterRegistration] = []
     @Published var agents: [AgentIdentity] = []
     @Published var chatEntries: [ChatEntry] = []
     @Published var runs: [RunRecord] = []
@@ -137,6 +153,10 @@ final class AppStore: ObservableObject {
     @Published var importedConversations: [ImportedConversation] = []
     @Published var taskContextSources: [TaskContextSource] = []
     @Published var contextSnapshots: [ContextSnapshot] = []
+    @Published var kernelContextSources: [ContextSourceRecord] = []
+    @Published var kernelContextRecords: [ContextRecord] = []
+    @Published var kernelContextConflicts: [ContextConflictRecord] = []
+    @Published var kernelContextPacks: [ProjectContextPackRecord] = []
     @Published var importedMessagesByConversation:
         [UUID: [ImportedConversationMessage]] = [:]
     @Published var checkpoints: [CheckpointRecord] = []
@@ -216,8 +236,80 @@ final class AppStore: ObservableObject {
     var projects: [ProjectCatalog.Project] {
         ProjectCatalog.projects(
             from: tasks,
-            preferences: projectPreferences
+            preferences: projectPreferences,
+            projects: projectRecords,
+            taskProjectLinks: taskProjectLinks
         )
+    }
+
+    func projectLink(for taskID: UUID) -> TaskProjectLink? {
+        taskProjectLinks.first { $0.taskID == taskID }
+    }
+
+    func projectRecord(for taskID: UUID) -> ProjectRecord? {
+        guard let projectID =
+            projectLink(for: taskID)?.projectID
+            ?? task(id: taskID)?.projectID else {
+            return nil
+        }
+        return projectRecords.first { $0.id == projectID }
+    }
+
+    func projectWorkspace(for taskID: UUID) -> ProjectWorkspaceRecord? {
+        guard let workspaceID =
+            projectLink(for: taskID)?.workspaceID
+            ?? task(id: taskID)?.workspaceID else {
+            return nil
+        }
+        return projectWorkspaces.first { $0.id == workspaceID }
+    }
+
+    func activeLease(for taskID: UUID) -> TaskLeaseRecord? {
+        taskLeases
+            .filter { $0.taskID == taskID && $0.isActive() }
+            .max { $0.fencingToken < $1.fencingToken }
+    }
+
+    func projectArtifacts(
+        for taskID: UUID
+    ) -> [ProjectArtifactRecord] {
+        projectArtifacts
+            .filter { $0.taskID == taskID }
+            .sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    func projectReviews(
+        for taskID: UUID
+    ) -> [ProjectReviewRecord] {
+        projectReviews
+            .filter { $0.taskID == taskID }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    func projectApprovals(
+        for taskID: UUID
+    ) -> [ProjectApprovalRecord] {
+        projectApprovals
+            .filter { $0.taskID == taskID }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    func projectActor(id: UUID?) -> ProjectActorRecord? {
+        guard let id else { return nil }
+        return projectActors.first { $0.id == id }
+    }
+
+    func principal(id: UUID?) -> PrincipalRecord? {
+        guard let id else { return nil }
+        return principals.first { $0.id == id }
+    }
+
+    func adapterRegistration(
+        endpointID: UUID
+    ) -> RuntimeAdapterRegistration? {
+        runtimeAdapterRegistrations.first {
+            $0.endpointID == endpointID
+        }
     }
 
     func isProjectExpanded(path: String) -> Bool {
@@ -399,6 +491,51 @@ final class AppStore: ObservableObject {
     func contextSnapshot(id: UUID?) -> ContextSnapshot? {
         guard let id else { return nil }
         return contextSnapshots.first { $0.id == id }
+    }
+
+    func kernelContextSources(
+        for taskID: UUID
+    ) -> [ContextSourceRecord] {
+        guard let projectID = projectRecord(for: taskID)?.id else {
+            return []
+        }
+        return kernelContextSources
+            .filter { $0.projectID == projectID }
+            .sorted { $0.importedAt > $1.importedAt }
+    }
+
+    func kernelContextRecords(
+        for taskID: UUID
+    ) -> [ContextRecord] {
+        guard let projectID = projectRecord(for: taskID)?.id else {
+            return []
+        }
+        return kernelContextRecords
+            .filter {
+                $0.projectID == projectID
+                    && ($0.scope.taskID == nil
+                        || $0.scope.taskID == taskID)
+            }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    func kernelContextConflicts(
+        for taskID: UUID
+    ) -> [ContextConflictRecord] {
+        guard let projectID = projectRecord(for: taskID)?.id else {
+            return []
+        }
+        return kernelContextConflicts
+            .filter { $0.projectID == projectID }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    func kernelContextPacks(
+        for taskID: UUID
+    ) -> [ProjectContextPackRecord] {
+        kernelContextPacks
+            .filter { $0.taskID == taskID }
+            .sorted { $0.createdAt > $1.createdAt }
     }
 
     func discoverConversationHistory(
@@ -638,6 +775,31 @@ final class AppStore: ObservableObject {
             let nextTasks = try service.store.fetchTasks()
             let nextProjectPreferences =
                 try service.store.fetchProjectPreferences()
+            let nextProjectRecords =
+                try service.store.fetchProjects()
+            let nextPrincipals =
+                try service.store.fetchPrincipals()
+            let nextProjectActors =
+                try service.store.fetchProjectActors()
+            let nextProjectMemberships =
+                try service.store.fetchProjectMemberships()
+            let nextDelegations =
+                try service.store.fetchDelegations()
+            let nextProjectWorkspaces =
+                try service.store.fetchProjectWorkspaces()
+            let nextTaskProjectLinks =
+                try service.store.fetchTaskProjectLinks()
+            let nextTaskLeases =
+                try service.store.fetchTaskLeases()
+            let nextProjectArtifacts =
+                try service.store.fetchProjectArtifacts()
+            let nextProjectReviews =
+                try service.store.fetchProjectReviews()
+            let nextProjectApprovals =
+                try service.store.fetchProjectApprovals()
+            let nextRuntimeAdapterRegistrations =
+                try service.store
+                .fetchRuntimeAdapterRegistrations()
             let nextAgents = try service.store.fetchAgents()
             let nextChatEntries = try service.store.fetchChatEntries()
             let nextRuns = try service.store.fetchRuns()
@@ -654,6 +816,30 @@ final class AppStore: ObservableObject {
             }
             let nextContextSnapshots =
                 try service.store.fetchContextSnapshots()
+            let nextKernelContextSources =
+                try nextProjectRecords.flatMap {
+                    try service.store.fetchContextSources(
+                        projectID: $0.id
+                    )
+                }
+            let nextKernelContextRecords =
+                try nextProjectRecords.flatMap {
+                    try service.store.fetchContextRecords(
+                        projectID: $0.id
+                    )
+                }
+            let nextKernelContextConflicts =
+                try nextProjectRecords.flatMap {
+                    try service.store.fetchContextConflicts(
+                        projectID: $0.id
+                    )
+                }
+            let nextKernelContextPacks =
+                try nextProjectRecords.flatMap {
+                    try service.store.fetchProjectContextPacks(
+                        projectID: $0.id
+                    )
+                }
             let importedConversationIDs =
                 Set(nextImportedConversations.map(\.id))
             let nextImportedMessagesByConversation =
@@ -672,6 +858,54 @@ final class AppStore: ObservableObject {
             replaceIfChanged(
                 &projectPreferences,
                 with: nextProjectPreferences
+            )
+            replaceIfChanged(
+                &projectRecords,
+                with: nextProjectRecords
+            )
+            replaceIfChanged(
+                &principals,
+                with: nextPrincipals
+            )
+            replaceIfChanged(
+                &projectActors,
+                with: nextProjectActors
+            )
+            replaceIfChanged(
+                &projectMemberships,
+                with: nextProjectMemberships
+            )
+            replaceIfChanged(
+                &delegations,
+                with: nextDelegations
+            )
+            replaceIfChanged(
+                &projectWorkspaces,
+                with: nextProjectWorkspaces
+            )
+            replaceIfChanged(
+                &taskProjectLinks,
+                with: nextTaskProjectLinks
+            )
+            replaceIfChanged(
+                &taskLeases,
+                with: nextTaskLeases
+            )
+            replaceIfChanged(
+                &projectArtifacts,
+                with: nextProjectArtifacts
+            )
+            replaceIfChanged(
+                &projectReviews,
+                with: nextProjectReviews
+            )
+            replaceIfChanged(
+                &projectApprovals,
+                with: nextProjectApprovals
+            )
+            replaceIfChanged(
+                &runtimeAdapterRegistrations,
+                with: nextRuntimeAdapterRegistrations
             )
             replaceIfChanged(&agents, with: nextAgents)
             replaceIfChanged(&chatEntries, with: nextChatEntries)
@@ -701,6 +935,22 @@ final class AppStore: ObservableObject {
                 with: nextContextSnapshots
             )
             replaceIfChanged(
+                &kernelContextSources,
+                with: nextKernelContextSources
+            )
+            replaceIfChanged(
+                &kernelContextRecords,
+                with: nextKernelContextRecords
+            )
+            replaceIfChanged(
+                &kernelContextConflicts,
+                with: nextKernelContextConflicts
+            )
+            replaceIfChanged(
+                &kernelContextPacks,
+                with: nextKernelContextPacks
+            )
+            replaceIfChanged(
                 &importedMessagesByConversation,
                 with: nextImportedMessagesByConversation
             )
@@ -719,7 +969,9 @@ final class AppStore: ObservableObject {
             cleanupDetachedOpenWorkerObservers()
             let visibleTasks = ProjectCatalog.projects(
                 from: nextTasks,
-                preferences: nextProjectPreferences
+                preferences: nextProjectPreferences,
+                projects: nextProjectRecords,
+                taskProjectLinks: nextTaskProjectLinks
             ).flatMap(\.tasks)
             if selectedTaskID == nil
                 || !visibleTasks.contains(where: {
@@ -861,6 +1113,13 @@ final class AppStore: ObservableObject {
                     "Task created in Project. Native read-only Codex run is starting."
                 dispatchCodexTask(run)
             } else if registeredEndpoint(id: endpointID)?.runtimeTypeID
+                == ControlPlaneService.claudeCodeRuntimeTypeID,
+               let runID = task.currentRunID,
+               let run = runs.first(where: { $0.id == runID }) {
+                transientMessage =
+                    "Task created in Project. Native read-only Claude Code run is starting."
+                dispatchClaudeCodeTask(run)
+            } else if registeredEndpoint(id: endpointID)?.runtimeTypeID
                 == ControlPlaneService.openWorkerRuntimeTypeID {
                 transientMessage =
                     "Task created in Project. Native OpenWorker session is starting."
@@ -904,7 +1163,23 @@ final class AppStore: ObservableObject {
                 transientMessage = "Local workspace note saved."
                 return
             }
-            if let bindingID = prepared.entry.runtimeSessionBindingID {
+            let runtimeTypeID =
+                registeredEndpoint(id: route.endpointID)?
+                .runtimeTypeID
+            if runtimeTypeID
+                == ControlPlaneService.codexRuntimeTypeID {
+                dispatchManagedWorkspaceMessage(
+                    entryID: prepared.entry.id,
+                    provider: .codex
+                )
+            } else if runtimeTypeID
+                == ControlPlaneService.claudeCodeRuntimeTypeID {
+                dispatchManagedWorkspaceMessage(
+                    entryID: prepared.entry.id,
+                    provider: .claudeCode
+                )
+            } else if let bindingID =
+                prepared.entry.runtimeSessionBindingID {
                 Task { [weak self] in
                     await self?.connectAndDispatchOpenWorker(bindingID: bindingID)
                 }
@@ -918,6 +1193,77 @@ final class AppStore: ObservableObject {
             }
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func dispatchManagedWorkspaceMessage(
+        entryID: UUID,
+        provider: ConversationProvider
+    ) {
+        guard let service else { return }
+        let runID = chatEntries.first {
+            $0.id == entryID
+        }?.runID
+        if let runID {
+            dispatchingRunIDs.insert(runID)
+            Task { [weak self] in
+                while self?.dispatchingRunIDs
+                    .contains(runID) == true {
+                    try? await Task.sleep(
+                        for: .milliseconds(500)
+                    )
+                    guard let self,
+                          dispatchingRunIDs
+                            .contains(runID) else {
+                        break
+                    }
+                    reload()
+                }
+            }
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result: Result<String, Error>
+            switch provider {
+            case .codex:
+                result = Result {
+                    let receipt =
+                        try service
+                        .dispatchCodexWorkspaceMessage(
+                            entryID: entryID
+                        )
+                    return receipt.status
+                }
+            case .claudeCode:
+                result = Result {
+                    let receipt =
+                        try service
+                        .dispatchClaudeCodeWorkspaceMessage(
+                            entryID: entryID
+                        )
+                    return receipt.status
+                }
+            default:
+                result = .failure(
+                    MuError.capabilityMissing(
+                        "This Runtime has no managed Workspace Chat adapter."
+                    )
+                )
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if let runID {
+                    dispatchingRunIDs.remove(runID)
+                }
+                reload()
+                switch result {
+                case .success(let status):
+                    transientMessage =
+                        "\(provider.displayName) finished with status \(status); "
+                        + "the result is available for Project review."
+                case .failure(let error):
+                    errorMessage = error.localizedDescription
+                }
+            }
         }
     }
 
@@ -951,6 +1297,10 @@ final class AppStore: ObservableObject {
                 provenance: draft.provenance,
                 permissionModel: draft.permissionModel,
                 executablePath: draft.executablePath,
+                surfaceKind: draft.surfaceKind,
+                instanceLabel: draft.instanceLabel,
+                terminalIdentifier:
+                    draft.terminalIdentifier,
                 notes: draft.notes
             )
             reload()
@@ -1068,7 +1418,11 @@ final class AppStore: ObservableObject {
         }
         probingEndpointIDs.insert(endpoint.id)
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = Result { try service.probeCodexEndpoint() }
+            let result = Result {
+                try service.probeCodexEndpoint(
+                    endpointID: endpoint.id
+                )
+            }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.probingEndpointIDs.remove(endpoint.id)
@@ -1109,6 +1463,35 @@ final class AppStore: ObservableObject {
                 refreshOpenWorkerSessions()
             case .failure(let error):
                 errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func probeClaudeCode(_ endpoint: RuntimeEndpoint) {
+        guard let service,
+              endpoint.runtimeTypeID
+                == ControlPlaneService.claudeCodeRuntimeTypeID,
+              !probingEndpointIDs.contains(endpoint.id) else {
+            return
+        }
+        probingEndpointIDs.insert(endpoint.id)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result {
+                try service.probeClaudeCodeEndpoint(
+                    endpointID: endpoint.id
+                )
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                probingEndpointIDs.remove(endpoint.id)
+                reload()
+                switch result {
+                case .success:
+                    transientMessage =
+                        "Claude Code CLI and authentication were verified."
+                case .failure(let error):
+                    errorMessage = error.localizedDescription
+                }
             }
         }
     }
@@ -1187,6 +1570,67 @@ final class AppStore: ObservableObject {
                     self.errorMessage = error.localizedDescription
                 }
             }
+        }
+    }
+
+    func dispatchClaudeCodeTask(_ run: RunRecord) {
+        guard let service,
+              !dispatchingRunIDs.contains(run.id) else {
+            return
+        }
+        dispatchingRunIDs.insert(run.id)
+        Task { [weak self] in
+            while self?.dispatchingRunIDs.contains(run.id) == true {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard let self,
+                      dispatchingRunIDs.contains(run.id) else {
+                    break
+                }
+                reload()
+            }
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result {
+                try service.dispatchClaudeCodeTask(
+                    runID: run.id
+                )
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                dispatchingRunIDs.remove(run.id)
+                reload()
+                switch result {
+                case .success(let receipt):
+                    transientMessage =
+                        receipt.status == "cancelled"
+                        ? "Claude Code was interrupted; its partial receipt is preserved."
+                        : "Claude Code completed; its result is a reviewable Project Artifact."
+                case .failure(let error):
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func interruptClaudeCode(_ run: RunRecord) {
+        guard let service else { return }
+        do {
+            try service.interruptClaudeCodeRun(runID: run.id)
+            transientMessage =
+                "Interrupt requested for Claude Code."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func interruptCodex(_ run: RunRecord) {
+        guard let service else { return }
+        do {
+            try service.interruptCodexRun(runID: run.id)
+            transientMessage =
+                "Interrupt requested through Codex App Server."
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -1356,18 +1800,12 @@ final class AppStore: ObservableObject {
 
     private func startInitialOpenWorkerTask(_ task: TaskRecord) {
         guard let service else { return }
-        let criteria = task.successCriteria.isEmpty
-            ? ""
-            : "\n\nSuccess criteria:\n"
-                + task.successCriteria.map { "- \($0)" }.joined(separator: "\n")
-        let constraints = task.constraints.isEmpty
-            ? ""
-            : "\n\nConstraints:\n"
-                + task.constraints.map { "- \($0)" }.joined(separator: "\n")
         do {
             let prepared = try service.prepareWorkspaceMessage(
                 taskID: task.id,
-                text: "@OpenWorker \(task.objective)\(criteria)\(constraints)"
+                text:
+                    "@OpenWorker Start this Project task using its governed "
+                    + "objective, constraints, and acceptance criteria."
             )
             let binding = try service.bindOpenWorkerSession(
                 taskID: task.id,
@@ -1514,17 +1952,6 @@ final class AppStore: ObservableObject {
                   $0.runtimeSessionBindingID == bindingID
                       && $0.deliveryState == .ambiguous
               }) else {
-            return
-        }
-        if let contextStatus =
-            try? service.importedContextRoutingStatus(
-                taskID: binding.taskID,
-                bindingID: bindingID
-            ),
-            contextStatus.blocksAutomaticDispatch {
-            // Keep the message queued and let the inline relink UI resolve the
-            // deterministic workspace boundary. Retrying every poll would
-            // only reproduce the same global error.
             return
         }
         guard let entry = try? service.queuedWorkspaceMessages(

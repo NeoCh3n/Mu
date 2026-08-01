@@ -20,7 +20,9 @@ extension ControlPlaneService {
                 "Project name must be 240 bytes or fewer."
             )
         }
-        try requireProjectTasks(repositoryPath: canonicalPath)
+        let project = try requireProject(
+            repositoryPath: canonicalPath
+        )
 
         let now = Date()
         var preference =
@@ -34,10 +36,18 @@ extension ControlPlaneService {
         preference.displayName = trimmedName
         preference.isRemoved = false
         preference.updatedAt = now
+        var updatedProject = project
+        updatedProject.displayName = trimmedName
+        updatedProject.status = .active
+        updatedProject.updatedAt = now
         try store.withTransaction {
+            try store.upsertProject(updatedProject)
             try store.upsertProjectPreference(preference)
             try store.appendEvent(
                 LedgerEvent(
+                    projectID: updatedProject.id,
+                    actorID: Self.localHumanActorID,
+                    principalID: Self.localOwnerPrincipalID,
                     type: "project.renamed",
                     summary: "Renamed Project to “\(trimmedName)”.",
                     payload: [
@@ -60,7 +70,9 @@ extension ControlPlaneService {
         let canonicalPath = WorkspacePathIdentity.canonicalPath(
             repositoryPath
         )
-        try requireProjectTasks(repositoryPath: canonicalPath)
+        let project = try requireProject(
+            repositoryPath: canonicalPath
+        )
 
         let now = Date()
         var preference =
@@ -72,10 +84,17 @@ extension ControlPlaneService {
             )
         preference.isRemoved = true
         preference.updatedAt = now
+        var updatedProject = project
+        updatedProject.status = .archived
+        updatedProject.updatedAt = now
         try store.withTransaction {
+            try store.upsertProject(updatedProject)
             try store.upsertProjectPreference(preference)
             try store.appendEvent(
                 LedgerEvent(
+                    projectID: updatedProject.id,
+                    actorID: Self.localHumanActorID,
+                    principalID: Self.localOwnerPrincipalID,
                     type: "project.removed",
                     summary: "Removed a Project from Mu's catalog.",
                     payload: [
@@ -99,11 +118,27 @@ extension ControlPlaneService {
         guard var preference =
             try projectPreference(repositoryPath: canonicalPath),
             preference.isRemoved else {
+            if var project = try store.fetchProject(
+                repositoryPath: canonicalPath
+            ), project.status == .archived {
+                project.status = .active
+                project.updatedAt = Date()
+                try store.upsertProject(project)
+            }
             return nil
         }
         preference.isRemoved = false
         preference.updatedAt = Date()
-        try store.upsertProjectPreference(preference)
+        try store.withTransaction {
+            try store.upsertProjectPreference(preference)
+            if var project = try store.fetchProject(
+                repositoryPath: canonicalPath
+            ) {
+                project.status = .active
+                project.updatedAt = preference.updatedAt
+                try store.upsertProject(project)
+            }
+        }
         return preference
     }
 
@@ -120,9 +155,14 @@ extension ControlPlaneService {
             .max { $0.updatedAt < $1.updatedAt }
     }
 
-    private func requireProjectTasks(
+    private func requireProject(
         repositoryPath: String
-    ) throws {
+    ) throws -> ProjectRecord {
+        if let project = try store.fetchProject(
+            repositoryPath: repositoryPath
+        ) {
+            return project
+        }
         guard try store.fetchTasks().contains(where: {
             WorkspacePathIdentity.isExactMatch(
                 $0.repositoryPath,
@@ -133,5 +173,8 @@ extension ControlPlaneService {
                 "Project \(repositoryPath)"
             )
         }
+        return try resolveOrCreateProject(
+            repositoryPath: repositoryPath
+        )
     }
 }

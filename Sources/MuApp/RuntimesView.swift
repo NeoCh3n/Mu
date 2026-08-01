@@ -136,8 +136,24 @@ private struct RuntimeCard: View {
                         metadata("INSTANCE BASIS", instanceBasisLabel)
                     }
                     GridRow {
-                        metadata("PERMISSIONS", endpoint.permissionModel.rawValue)
-                        metadata("LOCATION", endpoint.location.rawValue)
+                        metadata(
+                            "CONTROL",
+                            gateway.controlMode.rawValue
+                        )
+                        metadata(
+                            "TRUST",
+                            gateway.trustLevel.rawValue
+                        )
+                    }
+                    GridRow {
+                        metadata(
+                            "EVENTS",
+                            gateway.observationFidelity.rawValue
+                        )
+                        metadata(
+                            "CONNECTION",
+                            gateway.connectionKind.rawValue
+                        )
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -243,8 +259,8 @@ private struct RuntimeCard: View {
             }
             .frame(
                 maxWidth: .infinity,
-                minHeight: 326,
-                maxHeight: 326,
+                minHeight: 352,
+                maxHeight: 352,
                 alignment: .topLeading
             )
         }
@@ -255,12 +271,17 @@ private struct RuntimeCard: View {
 
     private var isProbeable: Bool {
         endpoint.runtimeTypeID == ControlPlaneService.codexRuntimeTypeID
+            || endpoint.runtimeTypeID
+                == ControlPlaneService.claudeCodeRuntimeTypeID
             || endpoint.runtimeTypeID == ControlPlaneService.openWorkerRuntimeTypeID
     }
 
     private func probe() {
         if endpoint.runtimeTypeID == ControlPlaneService.codexRuntimeTypeID {
             store.probeCodex(endpoint)
+        } else if endpoint.runtimeTypeID
+                    == ControlPlaneService.claudeCodeRuntimeTypeID {
+            store.probeClaudeCode(endpoint)
         } else if endpoint.runtimeTypeID == ControlPlaneService.openWorkerRuntimeTypeID {
             store.probeOpenWorker(endpoint)
         }
@@ -269,6 +290,10 @@ private struct RuntimeCard: View {
     private var accent: Color {
         if endpoint.runtimeTypeID == ControlPlaneService.codexRuntimeTypeID {
             return .blue
+        }
+        if endpoint.runtimeTypeID
+            == ControlPlaneService.claudeCodeRuntimeTypeID {
+            return MuPalette.violet
         }
         if endpoint.runtimeTypeID == ControlPlaneService.openWorkerRuntimeTypeID {
             return MuPalette.mint
@@ -296,6 +321,12 @@ private struct RuntimeCard: View {
         case .installation: "Installation"
         case .unknown: "Not reported"
         }
+    }
+
+    private var gateway: RuntimeGatewayManifest {
+        store.adapterRegistration(endpointID: endpoint.id)?
+            .manifest
+            ?? endpoint.gatewayManifest
     }
 
     private func metadata(_ label: String, _ value: String) -> some View {

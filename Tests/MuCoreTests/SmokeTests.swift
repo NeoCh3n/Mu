@@ -256,20 +256,23 @@ func checkpointHashIsDeterministic() throws {
         #expect(try service.store.fetchEndpoint(id: manual.id) == manualSnapshot)
         #expect(try service.store.fetchRegisteredEndpoint(id: manual.id) == nil)
 
-        do {
-            _ = try service.registerManualEndpoint(
-                displayName: "Pi RPC restored",
-                runtimeTypeID: "earendil.pi/coding-agent-rpc",
-                location: .local,
-                provenance: .vendorProtocol,
-                permissionModel: .none,
-                executablePath: nil,
-                notes: ""
-            )
-            Issue.record("A removed Runtime type ID should require an explicit restore flow.")
-        } catch {
-            #expect(error.localizedDescription.contains("already registered"))
-        }
+        // One provider/runtime type can represent multiple separately named
+        // CLI or desktop instances. Removing one registration must not block
+        // a fresh, independently identified instance.
+        let restoredInstance = try service.registerManualEndpoint(
+            displayName: "Pi RPC restored",
+            runtimeTypeID: "earendil.pi/coding-agent-rpc",
+            location: .local,
+            provenance: .vendorProtocol,
+            permissionModel: .none,
+            executablePath: nil,
+            notes: ""
+        )
+        #expect(restoredInstance.id != manual.id)
+        #expect(restoredInstance.runtimeTypeID == manual.runtimeTypeID)
+        let registeredRestoredInstance = try service.store
+            .fetchRegisteredEndpoint(id: restoredInstance.id)
+        #expect(registeredRestoredInstance?.displayName == "Pi RPC restored")
 
         let source = try #require(
             try service.store.fetchRegisteredEndpoint(

@@ -2041,21 +2041,44 @@ struct OpenWorkerBridgeTests {
         )
         try service.store.upsertEndpoint(endpoint)
 
-        let task = TaskRecord(
+        let task = try service.createTask(
             title: "Lazy OpenWorker session",
             objective: "Dispatch before the native session row exists.",
             successCriteria: ["The binding remains dispatchable"],
             constraints: ["No real network"],
             pendingSteps: ["Send the queued message"],
             repositoryPath: fixture.root.path,
-            status: .running,
-            currentEndpointID: endpoint.id
+            sourceEndpointID: endpoint.id,
+            agentIdentityID:
+                ControlPlaneService.scoutAgentID
         )
-        try service.store.upsertTask(task)
-
-        let binding = RuntimeSessionBinding(
+        let kernel = try service.projectKernelContext(
+            taskID: task.id
+        )
+        let actorID = try #require(kernel.actor?.id)
+        let runID = try #require(task.currentRunID)
+        var run = try #require(
+            try service.store.fetchRun(id: runID)
+        )
+        let bindingID = UUID()
+        let lease = try service.claimTaskLease(
             taskID: task.id,
             endpointID: endpoint.id,
+            actorID: actorID,
+            runtimeBindingID: bindingID
+        )
+        let binding = RuntimeSessionBinding(
+            id: bindingID,
+            taskID: task.id,
+            projectID: kernel.project.id,
+            workspaceID: kernel.workspace.id,
+            actorID: actorID,
+            principalID: kernel.principal?.id,
+            taskLeaseID: lease.id,
+            runID: run.id,
+            endpointID: endpoint.id,
+            agentIdentityID:
+                ControlPlaneService.scoutAgentID,
             nativeSessionID: "mu-lazy-session",
             nativeAgentName: "cowork",
             workspacePath: fixture.root.path,
@@ -2066,11 +2089,22 @@ struct OpenWorkerBridgeTests {
             lastSyncedMessageCount: 0,
             lastActivitySummary: "Native OpenWorker session prepared."
         )
-        try service.store.upsertRuntimeSessionBinding(binding)
+        run.projectID = kernel.project.id
+        run.workspaceID = kernel.workspace.id
+        run.actorID = actorID
+        run.principalID = kernel.principal?.id
+        run.taskLeaseID = lease.id
+        try service.store.withTransaction {
+            try service.store.upsertRun(run)
+            try service.store.upsertRuntimeSessionBinding(
+                binding
+            )
+        }
 
         let queued = ChatEntry(
             taskID: task.id,
             targetEndpointID: endpoint.id,
+            runID: run.id,
             runtimeSessionBindingID: binding.id,
             deliveryState: .queued,
             routedText: "Run the lazy-session fixture.",
@@ -2244,6 +2278,139 @@ struct OpenWorkerBridgeTests {
         #expect(artifacts.count == 1)
         #expect(artifacts.first?.id == artifactID)
         #expect(artifacts.first?.byteCount == 128)
+    }
+
+    @Test
+    func openWorkerSyncCarriesProjectGovernanceAndMapsArtifacts()
+        async throws
+    {
+        let fixture = try SQLiteFixture()
+        defer { fixture.remove() }
+        let artifactDirectory = fixture.root.appending(
+            path: "reports",
+            directoryHint: .isDirectory
+        )
+        try FileManager.default.createDirectory(
+            at: artifactDirectory,
+            withIntermediateDirectories: true
+        )
+        let artifactURL = artifactDirectory.appending(path: "result.md")
+        try "# OpenWorker evidence\n".write(
+            to: artifactURL,
+            atomically: true,
+            encoding: .utf8
+        )
+        let byteCount = try #require(
+            FileManager.default.attributesOfItem(
+                atPath: artifactURL.path
+            )[.size] as? NSNumber
+        ).int64Value
+
+        OpenWorkerURLProtocolFixture.reset()
+        OpenWorkerURLProtocolFixture.install { request in
+            switch request.url?.path {
+            case "/v1/sessions/ow-governance/messages":
+                return .json(#"{"messages":[]}"#)
+            case "/v1/sessions":
+                return .json(
+                    """
+                    {"sessions":[{
+                      "session_id":"ow-governance",
+                      "workspace":"\(fixture.root.path)",
+                      "agent":"cowork",
+                      "model":"fixture-model",
+                      "mode":"interactive",
+                      "messages":0,
+                      "liveness":"idle"
+                    }]}
+                    """
+                )
+            case "/v1/sessions/ow-governance/artifacts":
+                return .json(
+                    """
+                    {"artifacts":[{
+                      "path":"reports/result.md",
+                      "abs_path":"\(artifactURL.path)",
+                      "name":"result.md",
+                      "kind":"markdown",
+                      "size":\(byteCount),
+                      "modified_at":1785114123
+                    }]}
+                    """
+                )
+            case "/v1/inbox":
+                return .json(#"{"items":[]}"#)
+            default:
+                return .json(#"{"detail":"not found"}"#, statusCode: 404)
+            }
+        }
+        let registered = URLProtocol.registerClass(OpenWorkerURLProtocolFixture.self)
+        defer {
+            URLProtocol.unregisterClass(OpenWorkerURLProtocolFixture.self)
+            OpenWorkerURLProtocolFixture.reset()
+        }
+        #expect(registered)
+
+        let service = try ControlPlaneService(
+            dataDirectory: fixture.root.appending(
+                path: "service-data",
+                directoryHint: .isDirectory
+            )
+        )
+        try service.store.upsertEndpoint(makeActiveOpenWorkerEndpoint())
+        let scout = try #require(
+            try service.store.fetchAgent(id: ControlPlaneService.scoutAgentID)
+        )
+        let task = try service.createTask(
+            title: "Governed OpenWorker sync",
+            objective: "Map a sidecar session into Project state.",
+            successCriteria: ["Artifact is reviewable"],
+            constraints: ["No real network"],
+            pendingSteps: ["Sync the fixture"],
+            repositoryPath: fixture.root.path,
+            sourceEndpointID: ControlPlaneService.openWorkerEndpointID,
+            agentIdentityID: scout.id
+        )
+        let existingSession = try JSONDecoder().decode(
+            OpenWorkerSessionSummary.self,
+            from: Data(
+                """
+                {"session_id":"ow-governance","workspace":"\(fixture.root.path)","agent":"cowork","model":"fixture-model","mode":"interactive","messages":0,"liveness":"idle"}
+                """.utf8
+            )
+        )
+        let binding = try service.bindOpenWorkerSession(
+            taskID: task.id,
+            existingSession: existingSession
+        )
+        let kernel = try service.projectKernelContext(taskID: task.id)
+
+        #expect(binding.projectID == kernel.project.id)
+        #expect(binding.workspaceID == kernel.workspace.id)
+        #expect(binding.actorID == kernel.actor?.id)
+        #expect(binding.principalID == kernel.principal?.id)
+        #expect(binding.taskLeaseID != nil)
+        let lease = try #require(
+            binding.taskLeaseID.flatMap { try service.store.fetchTaskLease(id: $0) }
+        )
+        #expect(lease.projectID == kernel.project.id)
+        #expect(lease.agentActorID == kernel.actor?.id)
+        #expect(lease.runtimeBindingID == binding.id)
+
+        _ = try await service.syncOpenWorkerSession(bindingID: binding.id)
+        let runtimeArtifact = try #require(
+            try service.store.fetchRuntimeArtifacts(taskID: task.id).first
+        )
+        let projectArtifactID = try #require(runtimeArtifact.projectArtifactID)
+        let projectArtifact = try #require(
+            try service.store.fetchProjectArtifact(id: projectArtifactID)
+        )
+        #expect(projectArtifact.projectID == kernel.project.id)
+        #expect(projectArtifact.taskID == task.id)
+        #expect(projectArtifact.producerActorID == kernel.actor?.id)
+        #expect(projectArtifact.status == .submitted)
+        #expect(projectArtifact.metadata["provider"] == "openworker")
+        #expect(projectArtifact.metadata["relative_path"] == "reports/result.md")
     }
 }
 

@@ -7,6 +7,16 @@ public final class GitRepositoryProbe {
         self.artifactStore = artifactStore
     }
 
+    public func baseRevision(path: String) -> String? {
+        let value = try? runGit(
+            ["rev-parse", "HEAD"],
+            at: path
+        ).trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        return value?.isEmpty == false ? value : nil
+    }
+
     public func capture(path: String) throws -> RepositorySnapshot {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),

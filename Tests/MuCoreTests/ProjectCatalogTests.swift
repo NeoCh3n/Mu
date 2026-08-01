@@ -23,9 +23,13 @@ struct ProjectCatalogTests {
         let project = try #require(groups.first)
 
         #expect(groups.count == 1)
-        #expect(project.id == "/tmp/mu-project-catalog/AgentCenter")
+        #expect(
+            project.id == ProjectRecord.stableID(
+                repositoryPath: "/tmp/mu-project-catalog/AgentCenter"
+            )
+        )
         #expect(project.name == "AgentCenter")
-        #expect(project.repositoryPath == project.id)
+        #expect(project.repositoryPath == "/tmp/mu-project-catalog/AgentCenter")
         #expect(project.tasks.map(\.id) == [newer.id, older.id])
         #expect(project.updatedAt == newer.updatedAt)
     }

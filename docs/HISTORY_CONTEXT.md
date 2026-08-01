@@ -7,8 +7,9 @@ Runtime session binding, Checkpoint, Handoff, or claim that an Agent is currentl
 working.
 
 The layer owns canonical workspace matching, normalized visible messages, native
-provenance, revision detection, explicit selection, local persistence, bounded
-Context composition, and delivery receipts. Native formats remain behind adapters.
+provenance, revision detection, explicit selection, and local persistence. The
+separate Context Kernel owns normalized claims, policies, review, conflicts,
+governed Pack composition, and delivery receipts. Native formats remain behind adapters.
 This lets a Project carry reviewed inputs and outputs across Agent changes without
 pretending that private model state, reasoning, tools, or a live native session is
 portable.
@@ -136,7 +137,7 @@ Import and Context delivery have separate limits:
 | Injected-adapter discovery | 512 metadata-only candidates per adapter, 64 KiB metadata per candidate, 64 warnings, and no message bodies before selection |
 | Discovery authorization cache | Latest results for at most two Tasks |
 | Context source/window query | Up to 512 enabled source rows, at most 80 conversations, up to 1,600 recent candidate rows, and up to one first-user anchor per conversation |
-| Delivered Context pack | 32 KiB UTF-8 total, 80 messages, and 8 KiB per message |
+| Legacy extraction window | 32 KiB UTF-8 total, 80 messages, and 8 KiB per message; never dispatched directly |
 
 The Claude reader streams in 64 KiB chunks and does not follow symlinks from its
 history tree. When a bound is reached, Mu retains the accepted prefix/window, records
@@ -147,11 +148,10 @@ it executes inside Mu's process.
 
 ## Persistence and refresh
 
-Imported conversations, individual messages, and per-Task Context selections use
-dedicated SQLite tables. Imported visible text is an explicit local copy. Context
-snapshot receipts use a separate table, but their durable form contains target and
-source IDs, the selection fingerprint, SHA-256, byte count, omission count, and
-truncation count—not the generated Context plaintext. Conversation identity is
+Imported conversations, individual messages, and per-Task extraction selections use
+dedicated SQLite tables. Imported visible text is an explicit local copy. Each
+conversation is also projected idempotently into restricted, owner-only Raw
+`ContextSource` metadata. Migration creates no `ContextRecord`. Conversation identity is
 provider instance + native session + canonical workspace. Codex and Claude retain
 native item IDs. OpenWorker uses session + source ordinal + role/content hash, so
 two identical prompts at different ordinals remain distinct.
@@ -166,48 +166,27 @@ source changed, and requires the user to review it rather than silently rewritin
 Context. Removing a Runtime from the registry does not remove already-imported
 history.
 
-Removing an imported conversation deletes Mu's local visible-text copy and disables
-it as a Context source. Mu also clears any unsent transient Context payload derived
-from that source and redacts legacy local payload fields. This cannot recall a
-Context envelope that was already delivered to, and may be retained by, a native
-Runtime session.
+Removing an imported conversation deletes Mu's local visible-text copy, clears its
+extraction selection, redacts legacy snapshot payloads, and transitions its Raw
+Source to `redacted`. Immutable audit and prior delivery hash receipts remain.
 
 ## Cross-Agent delivery
 
-Context is target-aware and generated at send time, not at import time:
+Raw history is not a cross-Agent delivery payload. Selection makes a local copy
+eligible for a future bounded extraction step. Proposed claims remain candidate
+records until a human accepts them.
 
-1. exclude disabled sources and an OpenWorker source whose exact provenance
-   envelope—provider instance/endpoint, native session ID, and canonical
-   workspace—matches the target envelope;
-2. retain the first user request and the newest eligible visible messages;
-3. cap each message at 8 KiB, the pack at 80 messages and 32 KiB UTF-8;
-4. encode a deterministic JSON reference with Task objective, success criteria,
-   constraints, pending steps, provider/session provenance, and explicit omission
-   and truncation counts;
-5. label the history as untrusted quotation, not system/developer instruction;
-6. attach it only once for the selected source revisions and native binding.
+At send time Mu builds a new governed Pack from accepted, currently authorized
+records and verified Artifacts. Permission filtering happens before ranking,
+rendering, or budgeting. The Pack is pinned to the exact Project, Task, Workspace,
+Actor, Principal, Runtime binding, fenced lease, policy and input revisions, item
+hashes, and rendered CAS receipt. Codex, Claude Code, and OpenWorker all use this
+same contract.
 
-The generated Context plaintext is staged only for the native dispatch interval and
-is redacted when delivery is accepted, rejected, or becomes ambiguous. Mu durably
-persists only the receipt: SHA-256, target/source and included-message IDs, byte
-count, omission count, and truncation count. The ledger likewise records only those
-identifiers and counts, never the Context body. The Workspace Chat row exposes that
-receipt. If delivery becomes ambiguous, the existing no-automatic-retry rule applies
-to the combined Context and current request.
+Mu records `prepared` immediately before submission and `delivered` or `failed`
+after the native adapter produces an auditable receipt. A Pack cannot be replayed
+through another binding or workspace. See [CONTEXT_KERNEL.md](CONTEXT_KERNEL.md).
 
-This in-memory rule applies to the generated Context envelope, not to the reviewed
-history itself: imported visible user/assistant messages are intentionally stored as
-a local SQLite copy until the user removes them.
-
-Context delivery is fail-closed across workspaces. Both the imported source and the
-target binding must exactly match the Task's canonical workspace; a live
-OpenWorker session link that the user separately confirmed for another workspace
-does not authorize history import or Context delivery there.
-
-Codex history may be natively resumable in Codex, but Mu 0.7 still does not claim an
-`@Codex` Workspace Chat continuation adapter. Claude Code is explicitly
-`history_only`. OpenWorker has both a history source and a separately verified live
-Runtime adapter. An unknown injected provider is history-only from Mu's perspective
-unless a distinct Runtime integration proves its capabilities. Any of these history
-sources can provide reviewed Context to a supported target Runtime without
-pretending Mu controls their native sessions.
+Unknown history providers remain history-only unless a distinct Runtime adapter
+proves live capabilities. Adding history support never grants Runtime control or
+canonical Context authority.

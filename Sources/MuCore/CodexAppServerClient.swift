@@ -18,6 +18,8 @@ public final class CodexAppServerClient {
     private var completedTurns: [String: TurnCompletion] = [:]
     private var agentMessages: [String: [String: AgentMessage]] = [:]
     private var agentMessageOrder: [String: [String]] = [:]
+    private var visibleTextObservers:
+        [String: @Sendable (String) -> Void] = [:]
     private var processFailure: String?
     private var initializedResult: [String: Any]?
 
@@ -307,21 +309,178 @@ public final class CodexAppServerClient {
     public func runReadOnlyTask(
         task: TaskRecord,
         agent: AgentIdentity?,
+        contextPack: ProjectContextPackRecord? = nil,
+        promptOverride: String? = nil,
         clientUserMessageID: String,
         timeout: TimeInterval = 600,
         onThreadStarted: (String) throws -> Void = { _ in },
-        onTurnStarted: (String, String) throws -> Void = { _, _ in }
+        onTurnStarted: (String, String) throws -> Void = { _, _ in },
+        onVisibleText:
+            @escaping @Sendable (String) -> Void = { _ in }
     ) throws -> CodexTurnResult {
         try runReadOnlyTurn(
             task: task,
             developerInstructions: taskDeveloperInstructions(agent: agent),
-            prompt: taskPrompt(task),
+            prompt:
+                promptOverride
+                ?? contextPack?.renderedMarkdown
+                ?? taskPrompt(task),
             clientUserMessageID: clientUserMessageID,
             threadName: task.title,
             reconcileHistory: true,
             timeout: timeout,
             onThreadStarted: onThreadStarted,
-            onTurnStarted: onTurnStarted
+            onTurnStarted: onTurnStarted,
+            onVisibleText: onVisibleText
+        )
+    }
+
+    /// Continues a Mu-owned persistent Codex thread without importing the
+    /// thread transcript as Project state. The prompt is a bounded Project
+    /// message and the official App Server remains the Runtime authority.
+    public func runReadOnlyContinuation(
+        threadID: String,
+        task: TaskRecord,
+        prompt: String,
+        clientUserMessageID: String,
+        timeout: TimeInterval = 600,
+        onTurnStarted:
+            (String, String) throws -> Void = { _, _ in },
+        onVisibleText:
+            @escaping @Sendable (String) -> Void = { _ in }
+    ) throws -> CodexTurnResult {
+        let normalizedThreadID = threadID.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !normalizedThreadID.isEmpty else {
+            throw MuError.invalidTransition(
+                "Codex continuation requires a native thread ID."
+            )
+        }
+        let normalizedPrompt = prompt.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !normalizedPrompt.isEmpty else {
+            throw MuError.invalidTransition(
+                "Codex continuation cannot be empty."
+            )
+        }
+        _ = try start()
+        let threadRead = try request(
+            method: "thread/read",
+            params: [
+                "threadId": normalizedThreadID,
+                "includeTurns": false
+            ],
+            timeout: 30
+        )
+        guard let thread =
+            threadRead["thread"] as? [String: Any],
+              thread["id"] as? String
+                == normalizedThreadID,
+              let cwd = thread["cwd"] as? String,
+              try Self.canonicalWorkspacePath(cwd)
+                == Self.canonicalWorkspacePath(
+                    task.repositoryPath
+                ) else {
+            throw MuError.invalidTransition(
+                "Codex thread does not belong to the exact Project workspace."
+            )
+        }
+
+        let turnResponse = try request(
+            method: "turn/start",
+            params: [
+                "threadId": normalizedThreadID,
+                "input": [[
+                    "type": "text",
+                    "text": normalizedPrompt,
+                    "text_elements": []
+                ]],
+                "cwd": task.repositoryPath,
+                "runtimeWorkspaceRoots": [
+                    task.repositoryPath
+                ],
+                "approvalPolicy": "never",
+                "approvalsReviewer": "user",
+                "sandboxPolicy": [
+                    "type": "readOnly",
+                    "networkAccess": false
+                ],
+                "clientUserMessageId":
+                    clientUserMessageID
+            ],
+            timeout: 30
+        )
+        guard let turn =
+            turnResponse["turn"] as? [String: Any],
+              let turnID = turn["id"] as? String else {
+            throw MuError.commandFailed(
+                "Codex turn/start returned no turn ID."
+            )
+        }
+        setVisibleTextObserver(
+            onVisibleText,
+            for: turnID
+        )
+        defer {
+            setVisibleTextObserver(nil, for: turnID)
+        }
+        try onTurnStarted(normalizedThreadID, turnID)
+        let completion = try waitForTurn(
+            threadID: normalizedThreadID,
+            turnID: turnID,
+            timeout: timeout
+        )
+        var output = agentMessage(for: turnID)
+        var historyReconciled = false
+        if let history = try? request(
+            method: "thread/read",
+            params: [
+                "threadId": normalizedThreadID,
+                "includeTurns": true
+            ],
+            timeout: 30
+        ) {
+            historyReconciled = true
+            let persisted = Self.agentMessage(
+                inThreadReadResponse: history,
+                turnID: turnID
+            )
+            if !persisted.isEmpty {
+                output = persisted
+            }
+        }
+        if completion.status == "completed",
+           output.trimmingCharacters(
+               in: .whitespacesAndNewlines
+           ).isEmpty {
+            throw MuError.commandFailed(
+                "Codex completed without an agent message."
+            )
+        }
+        return CodexTurnResult(
+            threadID: normalizedThreadID,
+            turnID: turnID,
+            output: output,
+            status: completion.status,
+            errorMessage: completion.errorMessage,
+            historyReconciled: historyReconciled
+        )
+    }
+
+    public func interrupt(
+        threadID: String,
+        turnID: String
+    ) throws {
+        _ = try start()
+        _ = try request(
+            method: "turn/interrupt",
+            params: [
+                "threadId": threadID,
+                "turnId": turnID
+            ],
+            timeout: 15
         )
     }
 
@@ -334,7 +493,9 @@ public final class CodexAppServerClient {
         reconcileHistory: Bool,
         timeout: TimeInterval,
         onThreadStarted: (String) throws -> Void = { _ in },
-        onTurnStarted: (String, String) throws -> Void = { _, _ in }
+        onTurnStarted: (String, String) throws -> Void = { _, _ in },
+        onVisibleText:
+            @escaping @Sendable (String) -> Void = { _ in }
     ) throws -> CodexTurnResult {
         _ = try start()
         let threadResponse = try request(
@@ -394,6 +555,13 @@ public final class CodexAppServerClient {
         guard let turn = turnResponse["turn"] as? [String: Any],
               let turnID = turn["id"] as? String else {
             throw MuError.commandFailed("Codex turn/start returned no turn ID.")
+        }
+        setVisibleTextObserver(
+            onVisibleText,
+            for: turnID
+        )
+        defer {
+            setVisibleTextObserver(nil, for: turnID)
         }
         try onTurnStarted(threadID, turnID)
 
@@ -533,25 +701,47 @@ public final class CodexAppServerClient {
            item["type"] as? String == "agentMessage",
            let itemID = item["id"] as? String,
            let text = item["text"] as? String {
+            let callback: (@Sendable (String) -> Void)?
+            let visibleText: String
             condition.lock()
             registerMessageItem(itemID, for: turnID)
             agentMessages[turnID, default: [:]][itemID] = AgentMessage(
                 text: text,
                 phase: item["phase"] as? String
             )
+            callback = visibleTextObservers[turnID]
+            visibleText = Self.preferredAgentMessage(
+                (agentMessageOrder[turnID] ?? []).compactMap {
+                    agentMessages[turnID]?[$0]
+                }
+            )
             condition.broadcast()
             condition.unlock()
+            if !visibleText.isEmpty {
+                callback?(visibleText)
+            }
         } else if method == "item/agentMessage/delta",
                   let turnID = params["turnId"] as? String,
                   let itemID = params["itemId"] as? String,
                   let delta = params["delta"] as? String {
+            let callback: (@Sendable (String) -> Void)?
+            let visibleText: String
             condition.lock()
             registerMessageItem(itemID, for: turnID)
             var item = agentMessages[turnID, default: [:]][itemID]
                 ?? AgentMessage(text: "", phase: nil)
             item.text.append(delta)
             agentMessages[turnID, default: [:]][itemID] = item
+            callback = visibleTextObservers[turnID]
+            visibleText = Self.preferredAgentMessage(
+                (agentMessageOrder[turnID] ?? []).compactMap {
+                    agentMessages[turnID]?[$0]
+                }
+            )
             condition.unlock()
+            if !visibleText.isEmpty {
+                callback?(visibleText)
+            }
         } else if method == "turn/completed",
                   let threadID = params["threadId"] as? String,
                   let turn = params["turn"] as? [String: Any],
@@ -573,6 +763,15 @@ public final class CodexAppServerClient {
         if !(agentMessageOrder[turnID] ?? []).contains(itemID) {
             agentMessageOrder[turnID, default: []].append(itemID)
         }
+    }
+
+    private func setVisibleTextObserver(
+        _ observer: (@Sendable (String) -> Void)?,
+        for turnID: String
+    ) {
+        condition.lock()
+        visibleTextObservers[turnID] = observer
+        condition.unlock()
     }
 
     private func waitForTurn(

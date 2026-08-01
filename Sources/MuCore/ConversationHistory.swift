@@ -593,6 +593,26 @@ public struct BuiltContextPack: Hashable, Sendable {
     }
 }
 
+public struct EnabledImportedContextEnvelope:
+    Hashable,
+    Sendable
+{
+    public var selectionFingerprint: String
+    public var conversationIDs: [UUID]
+    public var pack: BuiltContextPack
+
+    public init(
+        selectionFingerprint: String,
+        conversationIDs: [UUID],
+        pack: BuiltContextPack
+    ) {
+        self.selectionFingerprint =
+            selectionFingerprint
+        self.conversationIDs = conversationIDs
+        self.pack = pack
+    }
+}
+
 public enum ContextPackBuilder {
     public static let defaultByteBudget = 32 * 1_024
     public static let defaultMessageLimit = 80

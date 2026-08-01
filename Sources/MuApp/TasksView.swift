@@ -6,7 +6,7 @@ struct TasksWorkspaceView: View {
     @EnvironmentObject private var store: AppStore
     @SceneStorage("mu.projects.collapsed-project-paths")
     private var collapsedProjectPathsPayload = ""
-    @State private var fullyRevealedProjectIDs: Set<String> = []
+    @State private var fullyRevealedProjectIDs: Set<UUID> = []
     @State private var projectToRename: ProjectCatalog.Project?
     @State private var projectRenameValue = ""
     @State private var projectPendingRemoval: ProjectCatalog.Project?
@@ -140,7 +140,7 @@ struct TasksWorkspaceView: View {
 
             Divider()
 
-            if store.tasks.isEmpty {
+            if projects.isEmpty {
                 EmptyState(
                     symbol: "tray",
                     title: "No projects",
@@ -162,9 +162,12 @@ struct TasksWorkspaceView: View {
     }
 
     private var projectCountSummary: String {
+        let visibleTaskCount = projects.reduce(0) {
+            $0 + $1.taskCount
+        }
         let projectLabel = projects.count == 1 ? "Project" : "Projects"
-        let taskLabel = store.tasks.count == 1 ? "Task" : "Tasks"
-        return "\(projects.count) \(projectLabel) · \(store.tasks.count) \(taskLabel)"
+        let taskLabel = visibleTaskCount == 1 ? "Task" : "Tasks"
+        return "\(projects.count) \(projectLabel) · \(visibleTaskCount) \(taskLabel)"
     }
 
     @ViewBuilder

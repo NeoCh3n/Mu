@@ -230,7 +230,12 @@ private struct WorkspaceChatSurface: View {
     }
 
     private var bindings: [RuntimeSessionBinding] {
-        store.sessionBindings(for: task.id).filter {
+        store.sessionBindings(for: task.id)
+    }
+
+    private var openWorkerBindings:
+        [RuntimeSessionBinding] {
+        bindings.filter {
             store.endpoint(id: $0.endpointID)?.runtimeTypeID
                 == ControlPlaneService.openWorkerRuntimeTypeID
         }
@@ -267,7 +272,10 @@ private struct WorkspaceChatSurface: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Workspace chat")
                         .font(.headline)
-                    Text("Use @Agent or @OpenWorker to route work into a shared native session.")
+                    Text(
+                        "Use @Agent, @Codex, @Claude, or @OpenWorker "
+                            + "to route a bounded Project message."
+                    )
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -304,8 +312,8 @@ private struct WorkspaceChatSurface: View {
                 } label: {
                     StatusPill(
                         label: importedConversations.isEmpty
-                            ? "Context 0"
-                            : "Context \(enabledImportedConversations.count)"
+                            ? "History 0"
+                            : "History \(enabledImportedConversations.count)"
                                 + " of \(importedConversations.count)",
                         color: enabledImportedConversations.isEmpty
                             ? .secondary
@@ -315,7 +323,7 @@ private struct WorkspaceChatSurface: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(importedConversations.isEmpty)
-                .help("Show imported conversation Context")
+                .help("Show imported history Raw Sources")
 
                 StatusPill(
                     label: primaryBinding.map {
@@ -338,9 +346,9 @@ private struct WorkspaceChatSurface: View {
                 Divider()
             }
 
-            if !bindings.isEmpty {
+            if !openWorkerBindings.isEmpty {
                 VStack(spacing: 0) {
-                    ForEach(bindings) { binding in
+                    ForEach(openWorkerBindings) { binding in
                         OpenWorkerSessionBanner(
                             task: task,
                             binding: binding,
@@ -379,7 +387,7 @@ private struct WorkspaceChatSurface: View {
                         ForEach(interactions) { request in
                             OpenWorkerInteractionCard(request: request)
                         }
-                        ForEach(bindings) { binding in
+                        ForEach(openWorkerBindings) { binding in
                             if let stream = store.openWorkerStreamingText[binding.id],
                                !stream.isEmpty {
                                 OpenWorkerStreamingRow(
@@ -398,11 +406,16 @@ private struct WorkspaceChatSurface: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 7) {
-                    Button("@OpenWorker") {
-                        insertMention("@OpenWorker")
+                    ForEach(
+                        routeableRuntimeMentions,
+                        id: \.self
+                    ) { mention in
+                        Button("@\(mention)") {
+                            insertMention("@\(mention)")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
                     ForEach(routeableAgents.prefix(4)) { agent in
                         Button("@\(agent.displayName)") {
                             insertMention("@\(agent.displayName)")
@@ -467,9 +480,51 @@ private struct WorkspaceChatSurface: View {
     }
 
     private var hasStreamingOutput: Bool {
-        bindings.contains {
+        openWorkerBindings.contains {
             !(store.openWorkerStreamingText[$0.id] ?? "").isEmpty
         }
+    }
+
+    private var routeableRuntimeMentions:
+        [String] {
+        let endpoints = store.endpoints.filter {
+            $0.status == .active
+                && $0.gatewayManifest.supports(
+                    .submitInput,
+                    endpointIsActive: true
+                )
+        }
+        let codex = endpoints.filter {
+            $0.runtimeTypeID
+                == ControlPlaneService.codexRuntimeTypeID
+        }
+        let claude = endpoints.filter {
+            $0.runtimeTypeID
+                == ControlPlaneService
+                .claudeCodeRuntimeTypeID
+        }
+        var values = codex.map {
+            codex.count == 1
+                ? "Codex"
+                : "codex-"
+                    + $0.id.uuidString
+                    .lowercased().prefix(8)
+        }
+        values.append(contentsOf: claude.map {
+            claude.count == 1
+                ? "Claude"
+                : "claude-"
+                    + $0.id.uuidString
+                    .lowercased().prefix(8)
+        })
+        if endpoints.contains(where: {
+            $0.runtimeTypeID
+                == ControlPlaneService
+                .openWorkerRuntimeTypeID
+        }) {
+            values.append("OpenWorker")
+        }
+        return values.sorted()
     }
 
     private var routeableAgents: [AgentIdentity] {
@@ -999,7 +1054,7 @@ private struct ImportedContextPanel: View {
                         Image(systemName: "clock.arrow.circlepath")
                             .foregroundStyle(MuPalette.violet)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Imported Context")
+                            Text("Imported History · Raw Sources")
                                 .font(.subheadline.weight(.semibold))
                             Text(
                                 historyCountSummary
@@ -1016,7 +1071,7 @@ private struct ImportedContextPanel: View {
                 Spacer()
 
                 StatusPill(
-                    label: "\(enabledCount) enabled",
+                    label: "\(enabledCount) selected",
                     color: enabledCount == 0 ? .secondary : MuPalette.violet,
                     symbol: enabledCount == 0 ? "pause" : "checkmark"
                 )
@@ -1027,9 +1082,10 @@ private struct ImportedContextPanel: View {
                     "These are read-only local copies from other agent tools. "
                         + "This panel shows imported copies, not every conversation "
                         + "found in the Project. "
-                        + "They stay visually separate from live Mu messages. Enabled "
-                        + "conversations can be included as bounded, quoted Context when "
-                        + "work moves to another Agent."
+                        + "They stay visually separate from live Mu messages and "
+                        + "never become Project truth automatically. Enabled history "
+                        + "is eligible for bounded Context extraction and review; "
+                        + "only accepted records may enter a governed Pack."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -1147,7 +1203,7 @@ private struct ImportedConversationCard: View {
                 Spacer(minLength: 8)
 
                 Toggle(
-                    "Use as Context",
+                    "Select for extraction",
                     isOn: Binding(
                         get: { isContextEnabled },
                         set: { enabled in
@@ -1165,8 +1221,8 @@ private struct ImportedConversationCard: View {
                 .fixedSize()
                 .help(
                     isContextEnabled
-                        ? "Included in the next eligible cross-agent Context"
-                        : "Kept for viewing, excluded from future Context"
+                        ? "Eligible for bounded candidate extraction and human review; never injected directly"
+                        : "Kept as a Raw Source only and excluded from candidate extraction"
                 )
 
                 Button(role: .destructive) {
@@ -1262,10 +1318,10 @@ private struct ImportedConversationCard: View {
             }
         } message: {
             Text(
-                "Mu will remove this imported conversation and stop using it as "
-                    + "Context. The original \(conversation.provider.displayName) "
-                    + "history is not changed. Context already delivered to a native "
-                    + "session cannot be recalled; Mu retains only its hash receipt."
+                "Mu will delete this local transcript copy and mark its Raw Source "
+                    + "redacted. The original \(conversation.provider.displayName) "
+                    + "history is not changed. Immutable audit and delivery hash "
+                    + "receipts remain."
             )
         }
     }
@@ -3102,6 +3158,10 @@ private struct WorkspaceArtifactsSurface: View {
         store.runtimeArtifacts(for: task.id)
     }
 
+    private var projectArtifacts: [ProjectArtifactRecord] {
+        store.projectArtifacts(for: task.id)
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
@@ -3113,13 +3173,15 @@ private struct WorkspaceArtifactsSurface: View {
                     Spacer()
                     StatusPill(
                         label:
-                            "\(checkpoints.count + runsWithOutput.count + runtimeArtifacts.count) items",
+                            "\(checkpoints.count + projectArtifacts.count + runsWithOutput.count + runtimeArtifacts.count) items",
                         color: MuPalette.mint,
                         symbol: "shippingbox"
                     )
                 }
 
-                if checkpoints.isEmpty && runsWithOutput.isEmpty && runtimeArtifacts.isEmpty {
+                if checkpoints.isEmpty
+                    && projectArtifacts.isEmpty
+                    && runtimeArtifacts.isEmpty {
                     Panel {
                         EmptyState(
                             symbol: "shippingbox",
@@ -3153,6 +3215,75 @@ private struct WorkspaceArtifactsSurface: View {
                             }
                             if let uri = checkpoint.content.repository.untrackedManifestURI {
                                 artifactFact("UNTRACKED MANIFEST", uri)
+                            }
+                        }
+                    }
+                }
+
+                ForEach(projectArtifacts) { artifact in
+                    Panel(
+                        title: artifact.title,
+                        subtitle:
+                            "Project Artifact · "
+                            + artifact.kind.rawValue
+                                .replacingOccurrences(
+                                    of: "_",
+                                    with: " "
+                                )
+                            + " · v\(artifact.version)"
+                    ) {
+                        VStack(
+                            alignment: .leading,
+                            spacing: 10
+                        ) {
+                            HStack {
+                                StatusPill(
+                                    label:
+                                        artifact.status
+                                        .rawValue.capitalized,
+                                    color:
+                                        artifact.status
+                                            == .accepted
+                                        ? MuPalette.mint
+                                        : artifact.status
+                                            == .rejected
+                                            ? .red
+                                            : MuPalette.coral,
+                                    symbol:
+                                        artifact.status
+                                            == .accepted
+                                        ? "checkmark"
+                                        : "shippingbox"
+                                )
+                                Spacer()
+                                Text(
+                                    artifact.createdAt
+                                        .formatted(
+                                            date:
+                                                .abbreviated,
+                                            time:
+                                                .shortened
+                                        )
+                                )
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            }
+                            artifactFact(
+                                "SHA256",
+                                artifact.sha256
+                            )
+                            artifactFact(
+                                "URI",
+                                artifact.uri
+                            )
+                            if let provider =
+                                artifact.metadata[
+                                    "provider"
+                                ] {
+                                artifactFact(
+                                    "PRODUCER",
+                                    provider
+                                )
                             }
                         }
                     }
@@ -3230,6 +3361,57 @@ private struct WorkspaceInspector: View {
         store.runs(for: task.id).first { $0.id == task.currentRunID }
     }
 
+    private var project: ProjectRecord? {
+        store.projectRecord(for: task.id)
+    }
+
+    private var projectLink: TaskProjectLink? {
+        store.projectLink(for: task.id)
+    }
+
+    private var workspace: ProjectWorkspaceRecord? {
+        store.projectWorkspace(for: task.id)
+    }
+
+    private var actor: ProjectActorRecord? {
+        store.projectActor(
+            id:
+                currentRun?.actorID
+                ?? projectLink?.assignedToActorID
+                ?? task.assignedActorID
+        )
+    }
+
+    private var principal: PrincipalRecord? {
+        store.principal(
+            id:
+                currentRun?.principalID
+                ?? actor?.principalID
+                ?? projectLink?
+                    .costOwnerPrincipalID
+        )
+    }
+
+    private var activeLease: TaskLeaseRecord? {
+        store.activeLease(for: task.id)
+    }
+
+    private var contextSources: [ContextSourceRecord] {
+        store.kernelContextSources(for: task.id)
+    }
+
+    private var contextRecords: [ContextRecord] {
+        store.kernelContextRecords(for: task.id)
+    }
+
+    private var contextConflicts: [ContextConflictRecord] {
+        store.kernelContextConflicts(for: task.id)
+    }
+
+    private var contextPacks: [ProjectContextPackRecord] {
+        store.kernelContextPacks(for: task.id)
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -3245,6 +3427,100 @@ private struct WorkspaceInspector: View {
                     Text(task.objective)
                         .font(.subheadline)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+
+                inspectorSection("PROJECT CONTRACT") {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(project?.displayName ?? "Legacy Project")
+                            .font(.subheadline.weight(.semibold))
+                        if let project {
+                            Text(project.id.uuidString.lowercased())
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        HStack(spacing: 6) {
+                            Label(
+                                actor?.displayName
+                                    ?? "Unassigned Actor",
+                                systemImage:
+                                    actor?.kind == .human
+                                    ? "person"
+                                    : "cpu"
+                            )
+                            Text("·")
+                            Text(
+                                principal?.displayName
+                                    ?? "No Principal"
+                            )
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let workspace {
+                    inspectorSection("WORKSPACE") {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(
+                                workspace.isolationKind.rawValue
+                                    .replacingOccurrences(
+                                        of: "_",
+                                        with: " "
+                                    )
+                                    .capitalized
+                            )
+                            .font(.caption.weight(.semibold))
+                            Text(workspace.repositoryPath)
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .truncationMode(.middle)
+                            if let revision =
+                                workspace.baseRevision {
+                                Text("Base \(revision)")
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                    }
+                }
+
+                inspectorSection("TASK LEASE") {
+                    if let activeLease {
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack {
+                                StatusPill(
+                                    label: "Active",
+                                    color: MuPalette.mint,
+                                    symbol: "lock.fill"
+                                )
+                                Text(
+                                    "Fence \(activeLease.fencingToken)"
+                                )
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                            }
+                            Text(
+                                "Expires "
+                                    + activeLease.expiresAt
+                                    .formatted(
+                                        date: .omitted,
+                                        time: .standard
+                                    )
+                            )
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Label(
+                            "No active lease",
+                            systemImage: "lock.open"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
                 }
 
                 inspectorSection("AGENT IDENTITY") {
@@ -3288,6 +3564,21 @@ private struct WorkspaceInspector: View {
                             Text(endpoint.provenance.displayName)
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
+                            Text(
+                                endpoint.gatewayManifest
+                                    .controlMode.rawValue
+                                    .replacingOccurrences(
+                                        of: "_",
+                                        with: " "
+                                    )
+                                    .capitalized
+                                + " · "
+                                + endpoint.gatewayManifest
+                                    .observationFidelity
+                                    .displayName
+                            )
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(MuPalette.violet)
                             Text(endpoint.guaranteeNote)
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
@@ -3331,6 +3622,142 @@ private struct WorkspaceInspector: View {
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                             }
+                            if currentRun.state == .active,
+                               let endpoint = store.endpoint(
+                                   id: currentRun.endpointID
+                               ) {
+                                if endpoint.runtimeTypeID
+                                    == ControlPlaneService
+                                    .codexRuntimeTypeID {
+                                    Button(
+                                        "Interrupt Codex",
+                                        role: .destructive
+                                    ) {
+                                        store.interruptCodex(
+                                            currentRun
+                                        )
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                } else if endpoint.runtimeTypeID
+                                    == ControlPlaneService
+                                    .claudeCodeRuntimeTypeID {
+                                    Button(
+                                        "Interrupt Claude Code",
+                                        role: .destructive
+                                    ) {
+                                        store
+                                            .interruptClaudeCode(
+                                                currentRun
+                                            )
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                inspectorSection("PROJECT CONTEXT") {
+                    VStack(alignment: .leading, spacing: 9) {
+                        HStack(spacing: 6) {
+                            StatusPill(
+                                label:
+                                    "\(contextSources.filter { $0.state == .active }.count) sources",
+                                color: MuPalette.mint,
+                                symbol: "tray.full"
+                            )
+                            StatusPill(
+                                label:
+                                    "\(contextRecords.filter { $0.status == .accepted }.count) accepted",
+                                color: MuPalette.violet,
+                                symbol: "checkmark.seal"
+                            )
+                        }
+                        HStack(spacing: 6) {
+                            StatusPill(
+                                label:
+                                    "\(contextRecords.filter { $0.status == .candidate }.count) candidates",
+                                color: .orange,
+                                symbol: "clock"
+                            )
+                            StatusPill(
+                                label:
+                                    "\(contextConflicts.filter { $0.status == .unresolved }.count) conflicts",
+                                color:
+                                    contextConflicts.contains {
+                                        $0.status == .unresolved
+                                    }
+                                    ? MuPalette.coral
+                                    : .secondary,
+                                symbol: "exclamationmark.triangle"
+                            )
+                        }
+
+                        if let source = contextSources.first {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Latest source")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                Text(
+                                    source.runtimeProvider?
+                                        .displayName
+                                        ?? source.sourceType.rawValue
+                                            .replacingOccurrences(
+                                                of: "_",
+                                                with: " "
+                                            )
+                                            .capitalized
+                                )
+                                .font(.caption)
+                                Text(
+                                    source.state.rawValue.capitalized
+                                        + " · raw provenance"
+                                )
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                            }
+                        }
+
+                        if let pack = contextPacks.first {
+                            Divider()
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Latest immutable pack")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                Text(
+                                    pack.selectionPolicyVersion
+                                        ?? "Legacy Project pack"
+                                )
+                                .font(.caption)
+                                Text(
+                                    "\(pack.includedContextRecordIDs?.count ?? 0) records"
+                                        + " · "
+                                        + pack.createdAt.formatted(
+                                            date: .abbreviated,
+                                            time: .shortened
+                                        )
+                                )
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                            }
+                        } else if contextSources.isEmpty
+                                    && contextRecords.isEmpty {
+                            Text("No Context Kernel state yet")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text(
+                                "Raw and candidate state is excluded until "
+                                    + "a governed pack is built."
+                            )
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(
+                                horizontal: false,
+                                vertical: true
+                            )
                         }
                     }
                 }
@@ -3393,17 +3820,30 @@ private struct WorkspaceInspector: View {
                 }
 
                 inspectorSection("EVIDENCE") {
-                    HStack {
-                        Label(
-                            "\(store.checkpoints(for: task.id).count) checkpoints",
-                            systemImage: "seal"
-                        )
-                        .font(.caption)
-                        Spacer()
-                        Text("\(store.events(for: task.id).count) events")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Label(
+                                "\(store.projectArtifacts(for: task.id).count) artifacts",
+                                systemImage: "shippingbox"
+                            )
+                            Spacer()
+                            Text(
+                                "\(store.projectReviews(for: task.id).count) reviews"
+                            )
+                        }
+                        HStack {
+                            Label(
+                                "\(store.projectApprovals(for: task.id).filter { $0.decision == .pending }.count) approvals",
+                                systemImage: "checkmark.shield"
+                            )
+                            Spacer()
+                            Text(
+                                "\(store.events(for: task.id).count) events"
+                            )
+                        }
+                        .foregroundStyle(.secondary)
                     }
+                    .font(.caption)
                 }
             }
             .padding(16)

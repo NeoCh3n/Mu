@@ -846,15 +846,14 @@ struct ConversationHistoryTests {
             withIntermediateDirectories: true
         )
 
-        let foreignBinding = RuntimeSessionBinding(
-            taskID: task.id,
-            endpointID: ControlPlaneService.openWorkerEndpointID,
+        var foreignBinding = try governedOpenWorkerBinding(
+            in: service,
+            task: task,
             nativeSessionID: "foreign-workspace-session",
-            nativeAgentName: "cowork",
-            workspacePath: otherWorkspace.path,
-            connectionMode: "legacy_loopback",
-            state: .idle
+            workspacePath: fixture.repository.path
         )
+        foreignBinding.workspacePath = otherWorkspace.path
+        foreignBinding.updatedAt = Date()
         try service.store.upsertRuntimeSessionBinding(foreignBinding)
         let foreignEntry = queuedEntry(
             taskID: task.id,
@@ -892,47 +891,35 @@ struct ConversationHistoryTests {
         var corruptedSource = imported
         corruptedSource.canonicalWorkspacePath = otherWorkspace.path
         try service.store.upsertImportedConversation(corruptedSource)
-        let exactBinding = RuntimeSessionBinding(
-            taskID: task.id,
-            endpointID: ControlPlaneService.openWorkerEndpointID,
+        let exactBinding = try governedOpenWorkerBinding(
+            in: service,
+            task: task,
             nativeSessionID: "exact-workspace-session",
-            nativeAgentName: "cowork",
-            workspacePath: fixture.repository.path,
-            connectionMode: "legacy_loopback",
-            state: .idle
+            workspacePath: fixture.repository.path
         )
-        try service.store.upsertRuntimeSessionBinding(exactBinding)
         let sourceMismatchEntry = queuedEntry(
             taskID: task.id,
             bindingID: exactBinding.id,
             request: "Do not use a source copied from another workspace."
         )
         try service.store.insertChatEntry(sourceMismatchEntry)
-        do {
-            try await service.markWorkspaceMessageSending(
-                entryID: sourceMismatchEntry.id,
-                bindingID: exactBinding.id
-            )
-            Issue.record(
-                "A corrupted imported source workspace must block Context claim."
-            )
-        } catch let error as MuError {
-            #expect(
-                error.localizedDescription.contains(
-                    "enabled history source no longer matches"
-                )
-            )
-        } catch {
-            Issue.record("Unexpected error type: \(error)")
-        }
+        let payload = try await service.markWorkspaceMessageSending(
+            entryID: sourceMismatchEntry.id,
+            bindingID: exactBinding.id
+        )
         #expect(
             try service.store.fetchChatEntry(id: sourceMismatchEntry.id)?
-                .deliveryState == .queued
+                .deliveryState == .sending
         )
         #expect(
             try service.store.fetchRuntimeSessionBinding(
                 id: exactBinding.id
-            )?.state == .idle
+            )?.state == .connecting
+        )
+        #expect(
+            payload.contains(
+                "Reviewed context for the exact project only."
+            ) == false
         )
         #expect(
             try service.store.fetchContextSnapshots(taskID: task.id).isEmpty
@@ -1075,21 +1062,16 @@ struct ConversationHistoryTests {
         )
         #expect(imported.count == 3)
 
-        var binding = RuntimeSessionBinding(
-            taskID: task.id,
-            endpointID: ControlPlaneService.openWorkerEndpointID,
+        var binding = try governedOpenWorkerBinding(
+            in: service,
+            task: task,
             nativeSessionID: nativeSessionID,
-            nativeAgentName: "cowork",
-            workspacePath: fixture.repository.path,
-            connectionMode: "legacy_loopback",
-            origin: "linked_existing",
-            state: .idle,
-            lastActivitySummary: "Ready."
+            workspacePath: fixture.repository.path
         )
-        try service.store.upsertRuntimeSessionBinding(binding)
         let firstEntry = ChatEntry(
             taskID: task.id,
             targetEndpointID: ControlPlaneService.openWorkerEndpointID,
+            runID: binding.runID,
             runtimeSessionBindingID: binding.id,
             deliveryState: .queued,
             routedText: "First request",
@@ -1107,36 +1089,82 @@ struct ConversationHistoryTests {
         let claimedEntry = try #require(
             try service.store.fetchChatEntry(id: firstEntry.id)
         )
-        let snapshotID = try #require(claimedEntry.contextSnapshotID)
-        let snapshot = try #require(
-            try service.store.fetchContextSnapshots(bindingID: binding.id)
-                .first { $0.id == snapshotID }
-        )
-        let importedByProvider = Dictionary(
-            uniqueKeysWithValues: imported.map { ($0.provider, $0) }
-        )
         #expect(claimedEntry.deliveryState == .sending)
-        #expect(snapshot.content.isEmpty)
-        #expect(snapshot.utf8ByteCount > 0)
-        #expect(!snapshot.contentSHA256.isEmpty)
         #expect(claimedEntry.routedText == "First request")
-        #expect(claimedEntry.contextFreeRoutedText == "First request")
-        #expect(firstDispatchPayload.contains("Codex visible context."))
-        #expect(firstDispatchPayload.contains("Claude visible context."))
+        #expect(claimedEntry.contextFreeRoutedText == nil)
+        #expect(claimedEntry.contextSnapshotID == nil)
+        #expect(
+            firstDispatchPayload.contains(
+                "Codex visible context."
+            ) == false
+        )
+        #expect(
+            firstDispatchPayload.contains(
+                "Claude visible context."
+            ) == false
+        )
         #expect(firstDispatchPayload.contains("First request"))
         #expect(
             firstDispatchPayload.contains(
                 "Must not be injected back into its own native session."
             ) == false
         )
-        #expect(Set(snapshot.conversationIDs) == Set([
-            try #require(importedByProvider[.codex]).id,
-            try #require(importedByProvider[.claudeCode]).id
-        ]))
         #expect(
-            !snapshot.conversationIDs.contains(
-                try #require(importedByProvider[.openWorker]).id
+            try service.store.fetchContextSnapshots(
+                bindingID: binding.id
+            ).isEmpty
+        )
+        let kernel = try service.projectKernelContext(
+            taskID: task.id
+        )
+        #expect(
+            try service.store.fetchContextSources(
+                projectID: kernel.project.id
+            ).count == imported.count
+        )
+        #expect(
+            try service.store.fetchContextRecords(
+                projectID: kernel.project.id
+            ).isEmpty
+        )
+        binding = try #require(
+            try service.store.fetchRuntimeSessionBinding(
+                id: binding.id
             )
+        )
+        let firstPackID = try #require(
+            binding.contextPackID
+        )
+        let preparedReceipts =
+            try service.store.fetchContextDeliveries(
+                projectID: kernel.project.id,
+                taskID: task.id
+            ).filter {
+                $0.contextPackID == firstPackID
+            }
+        #expect(preparedReceipts.map(\.status) == [.prepared])
+
+        _ = try await service.recordOpenWorkerEvent(
+            bindingID: binding.id,
+            event: OpenWorkerEvent(
+                type: "turn_start",
+                data: ["turn_id": .string("turn-one")]
+            )
+        )
+        _ = try await service.recordOpenWorkerEvent(
+            bindingID: binding.id,
+            event: OpenWorkerEvent(type: "turn_done")
+        )
+        let deliveredReceipts =
+            try service.store.fetchContextDeliveries(
+                projectID: kernel.project.id,
+                taskID: task.id
+            ).filter {
+                $0.contextPackID == firstPackID
+            }
+        #expect(
+            Set(deliveredReceipts.map(\.status))
+                == Set([.prepared, .delivered])
         )
 
         binding = try #require(
@@ -1145,9 +1173,28 @@ struct ConversationHistoryTests {
         binding.state = .idle
         binding.updatedAt = Date()
         try service.store.upsertRuntimeSessionBinding(binding)
+        let secondRun = RunRecord(
+            taskID: task.id,
+            projectID: binding.projectID,
+            workspaceID: binding.workspaceID,
+            actorID: binding.actorID,
+            principalID: binding.principalID,
+            endpointID:
+                ControlPlaneService.openWorkerEndpointID,
+            actorName: "OpenWorker",
+            purpose: .delegation,
+            state: .starting,
+            nativeThreadID:
+                binding.nativeSessionID,
+            agentIdentityID:
+                binding.agentIdentityID
+        )
+        try service.store.upsertRun(secondRun)
         let secondEntry = ChatEntry(
             taskID: task.id,
-            targetEndpointID: ControlPlaneService.openWorkerEndpointID,
+            targetEndpointID:
+                ControlPlaneService.openWorkerEndpointID,
+            runID: secondRun.id,
             runtimeSessionBindingID: binding.id,
             deliveryState: .queued,
             routedText: "Second request",
@@ -1169,9 +1216,43 @@ struct ConversationHistoryTests {
         #expect(secondClaim.contextSnapshotID == nil)
         #expect(secondClaim.routedText == "Second request")
         #expect(
-            try service.store.fetchContextSnapshots(bindingID: binding.id).count
-                == 1
+            try service.store.fetchContextSnapshots(
+                bindingID: binding.id
+            ).isEmpty
         )
+        let secondBinding = try #require(
+            try service.store.fetchRuntimeSessionBinding(
+                id: binding.id
+            )
+        )
+        let secondPackID = try #require(
+            secondBinding.contextPackID
+        )
+        _ = try await service.recordOpenWorkerEvent(
+            bindingID: binding.id,
+            event: OpenWorkerEvent(
+                type: "connection_closed",
+                data: [
+                    "error":
+                        .string("fixture closed before ack")
+                ]
+            )
+        )
+        let secondReceipts =
+            try service.store.fetchContextDeliveries(
+                projectID: kernel.project.id,
+                taskID: task.id
+            ).filter {
+                $0.contextPackID == secondPackID
+            }
+        #expect(secondReceipts.contains {
+            $0.status == .prepared
+        })
+        #expect(secondReceipts.contains {
+            $0.status == .failed
+                && $0.failureCode
+                    == "openworker_connection_closed_before_ack"
+        })
     }
 
     @Test
@@ -1201,17 +1282,12 @@ struct ConversationHistoryTests {
         )
 
         let nativeSessionID = "mu-envelope-session"
-        let binding = RuntimeSessionBinding(
-            taskID: task.id,
-            endpointID: ControlPlaneService.openWorkerEndpointID,
+        let binding = try governedOpenWorkerBinding(
+            in: service,
+            task: task,
             nativeSessionID: nativeSessionID,
-            nativeAgentName: "cowork",
-            workspacePath: fixture.repository.path,
-            connectionMode: "legacy_loopback",
-            origin: "linked_existing",
-            state: .idle
+            workspacePath: fixture.repository.path
         )
-        try service.store.upsertRuntimeSessionBinding(binding)
         let currentRequest = "Continue only the current user request."
         let outbound = queuedEntry(
             taskID: task.id,
@@ -1227,40 +1303,51 @@ struct ConversationHistoryTests {
         let claimed = try #require(
             try service.store.fetchChatEntry(id: outbound.id)
         )
-        let snapshotID = try #require(claimed.contextSnapshotID)
-        let snapshot = try #require(
-            try service.store.fetchContextSnapshots(bindingID: binding.id)
-                .first { $0.id == snapshotID }
-        )
-        let encodedSnapshot = String(
-            decoding: try MuCoding.makeEncoder().encode(snapshot),
-            as: UTF8.self
-        )
+        let currentMessageSeparator =
+            "\n\n# Current Project message\n\n"
         let separatorRange = try #require(
             envelope.range(
-                of: ControlPlaneService.importedContextRequestSeparator,
+                of: currentMessageSeparator,
                 options: .backwards
             )
         )
-        let envelopeContext = String(
+        let renderedPack = String(
             envelope[..<separatorRange.lowerBound]
         )
-        #expect(snapshot.content.isEmpty)
-        #expect(snapshot.utf8ByteCount > 0)
-        #expect(
-            snapshot.contentSHA256 == Data(envelopeContext.utf8).muSHA256
+        let persistedBinding = try #require(
+            try service.store.fetchRuntimeSessionBinding(
+                id: binding.id
+            )
         )
-        #expect(!encodedSnapshot.contains(sourcePlaintext))
-        #expect(!encodedSnapshot.contains("SENSITIVE_REVIEWED_HISTORY"))
+        let packID = try #require(
+            persistedBinding.contextPackID
+        )
+        let projectID = try #require(
+            persistedBinding.projectID
+        )
+        let pack = try #require(
+            try service.store.fetchProjectContextPack(
+                projectID: projectID,
+                id: packID
+            )
+        )
+        #expect(claimed.contextSnapshotID == nil)
+        #expect(claimed.contextFreeRoutedText == nil)
+        #expect(
+            pack.contentSHA256
+                == Data(renderedPack.utf8).muSHA256
+        )
+        #expect(envelope.contains(sourcePlaintext) == false)
+        #expect(envelope.contains("SENSITIVE_REVIEWED_HISTORY") == false)
+        #expect(envelope.contains("<mu_imported_context>") == false)
         #expect(claimed.routedText == currentRequest)
-        #expect(claimed.contextFreeRoutedText == currentRequest)
         #expect(claimed.routedText?.contains(sourcePlaintext) == false)
 
         let storedOutbound = try #require(
             try service.store.fetchChatEntry(id: outbound.id)
         )
         #expect(storedOutbound.routedText == currentRequest)
-        #expect(storedOutbound.contextFreeRoutedText == currentRequest)
+        #expect(storedOutbound.contextFreeRoutedText == nil)
         #expect(storedOutbound.routedText?.contains(sourcePlaintext) == false)
 
         let openWorkerCandidate = ExternalConversationCandidate(
@@ -1310,7 +1397,8 @@ struct ConversationHistoryTests {
 
         #expect(importedMessages.count == 2)
         #expect(importedMessages.map(\.role) == [.user, .assistant])
-        #expect(importedMessages[0].text == currentRequest)
+        #expect(importedMessages[0].text == envelope)
+        #expect(importedMessages[0].text.contains(currentRequest))
         #expect(importedMessages[1].text == "Envelope import complete.")
         let importedText = importedMessages.map(\.text).joined(separator: "\n")
         #expect(!importedText.contains(sourcePlaintext))
@@ -1692,6 +1780,40 @@ private func queuedEntry(
         authorName: "You",
         text: "@OpenWorker \(request)"
     )
+}
+
+private func governedOpenWorkerBinding(
+    in service: ControlPlaneService,
+    task: TaskRecord,
+    nativeSessionID: String,
+    workspacePath: String
+) throws -> RuntimeSessionBinding {
+    let session = try MuCoding.makeDecoder().decode(
+        OpenWorkerSessionSummary.self,
+        from: Data(
+            """
+            {
+              "session_id": "\(nativeSessionID)",
+              "title": "Governed runtime fixture",
+              "workspace": "\(workspacePath)",
+              "agent": "cowork",
+              "model": "fixture-model",
+              "mode": "interactive",
+              "messages": 0,
+              "liveness": "idle"
+            }
+            """.utf8
+        )
+    )
+    var binding = try service.bindOpenWorkerSession(
+        taskID: task.id,
+        existingSession: session
+    )
+    binding.state = .idle
+    binding.lastActivitySummary = "Ready."
+    binding.updatedAt = Date()
+    try service.store.upsertRuntimeSessionBinding(binding)
+    return binding
 }
 
 private func historyCandidate(

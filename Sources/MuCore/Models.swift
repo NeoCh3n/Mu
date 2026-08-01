@@ -298,7 +298,13 @@ public enum RuntimeSessionState: String, Codable, CaseIterable, Sendable {
 public struct RuntimeSessionBinding: Identifiable, Codable, Hashable, Sendable {
     public var id: UUID
     public var taskID: UUID
+    public var projectID: UUID?
+    public var workspaceID: UUID?
+    public var actorID: UUID?
+    public var principalID: UUID?
+    public var taskLeaseID: UUID?
     public var runID: UUID?
+    public var contextPackID: UUID?
     public var endpointID: UUID
     public var agentIdentityID: UUID?
     public var nativeSessionID: String
@@ -317,7 +323,13 @@ public struct RuntimeSessionBinding: Identifiable, Codable, Hashable, Sendable {
     public init(
         id: UUID = UUID(),
         taskID: UUID,
+        projectID: UUID? = nil,
+        workspaceID: UUID? = nil,
+        actorID: UUID? = nil,
+        principalID: UUID? = nil,
+        taskLeaseID: UUID? = nil,
         runID: UUID? = nil,
+        contextPackID: UUID? = nil,
         endpointID: UUID,
         agentIdentityID: UUID? = nil,
         nativeSessionID: String,
@@ -335,7 +347,13 @@ public struct RuntimeSessionBinding: Identifiable, Codable, Hashable, Sendable {
     ) {
         self.id = id
         self.taskID = taskID
+        self.projectID = projectID
+        self.workspaceID = workspaceID
+        self.actorID = actorID
+        self.principalID = principalID
+        self.taskLeaseID = taskLeaseID
         self.runID = runID
+        self.contextPackID = contextPackID
         self.endpointID = endpointID
         self.agentIdentityID = agentIdentityID
         self.nativeSessionID = nativeSessionID
@@ -371,6 +389,7 @@ public enum RuntimeInteractionState: String, Codable, Sendable {
 public struct RuntimeInteractionRequest: Identifiable, Codable, Hashable, Sendable {
     public var id: UUID
     public var taskID: UUID
+    public var projectApprovalID: UUID?
     public var bindingID: UUID
     public var endpointID: UUID
     public var nativeSessionID: String
@@ -386,6 +405,7 @@ public struct RuntimeInteractionRequest: Identifiable, Codable, Hashable, Sendab
     public init(
         id: UUID = UUID(),
         taskID: UUID,
+        projectApprovalID: UUID? = nil,
         bindingID: UUID,
         endpointID: UUID,
         nativeSessionID: String,
@@ -400,6 +420,7 @@ public struct RuntimeInteractionRequest: Identifiable, Codable, Hashable, Sendab
     ) {
         self.id = id
         self.taskID = taskID
+        self.projectApprovalID = projectApprovalID
         self.bindingID = bindingID
         self.endpointID = endpointID
         self.nativeSessionID = nativeSessionID
@@ -417,6 +438,7 @@ public struct RuntimeInteractionRequest: Identifiable, Codable, Hashable, Sendab
 public struct RuntimeArtifactRecord: Identifiable, Codable, Hashable, Sendable {
     public var id: UUID
     public var taskID: UUID
+    public var projectArtifactID: UUID?
     public var bindingID: UUID
     public var endpointID: UUID
     public var nativeSessionID: String
@@ -431,6 +453,7 @@ public struct RuntimeArtifactRecord: Identifiable, Codable, Hashable, Sendable {
     public init(
         id: UUID = UUID(),
         taskID: UUID,
+        projectArtifactID: UUID? = nil,
         bindingID: UUID,
         endpointID: UUID,
         nativeSessionID: String,
@@ -444,6 +467,7 @@ public struct RuntimeArtifactRecord: Identifiable, Codable, Hashable, Sendable {
     ) {
         self.id = id
         self.taskID = taskID
+        self.projectArtifactID = projectArtifactID
         self.bindingID = bindingID
         self.endpointID = endpointID
         self.nativeSessionID = nativeSessionID
@@ -459,6 +483,10 @@ public struct RuntimeArtifactRecord: Identifiable, Codable, Hashable, Sendable {
 
 public struct TaskRecord: Identifiable, Codable, Hashable, Sendable {
     public var id: UUID
+    public var projectID: UUID?
+    public var workspaceID: UUID?
+    public var requestedByActorID: UUID?
+    public var assignedActorID: UUID?
     public var title: String
     public var objective: String
     public var successCriteria: [String]
@@ -474,6 +502,10 @@ public struct TaskRecord: Identifiable, Codable, Hashable, Sendable {
 
     public init(
         id: UUID = UUID(),
+        projectID: UUID? = nil,
+        workspaceID: UUID? = nil,
+        requestedByActorID: UUID? = nil,
+        assignedActorID: UUID? = nil,
         title: String,
         objective: String,
         successCriteria: [String],
@@ -488,6 +520,10 @@ public struct TaskRecord: Identifiable, Codable, Hashable, Sendable {
         updatedAt: Date = Date()
     ) {
         self.id = id
+        self.projectID = projectID
+        self.workspaceID = workspaceID
+        self.requestedByActorID = requestedByActorID
+        self.assignedActorID = assignedActorID
         self.title = title
         self.objective = objective
         self.successCriteria = successCriteria
@@ -506,6 +542,12 @@ public struct TaskRecord: Identifiable, Codable, Hashable, Sendable {
 public struct RunRecord: Identifiable, Codable, Hashable, Sendable {
     public var id: UUID
     public var taskID: UUID
+    public var projectID: UUID?
+    public var workspaceID: UUID?
+    public var actorID: UUID?
+    public var principalID: UUID?
+    public var taskLeaseID: UUID?
+    public var contextPackID: UUID?
     public var endpointID: UUID
     public var actorName: String
     public var purpose: RunPurpose
@@ -521,6 +563,12 @@ public struct RunRecord: Identifiable, Codable, Hashable, Sendable {
     public init(
         id: UUID = UUID(),
         taskID: UUID,
+        projectID: UUID? = nil,
+        workspaceID: UUID? = nil,
+        actorID: UUID? = nil,
+        principalID: UUID? = nil,
+        taskLeaseID: UUID? = nil,
+        contextPackID: UUID? = nil,
         endpointID: UUID,
         actorName: String,
         purpose: RunPurpose,
@@ -535,6 +583,12 @@ public struct RunRecord: Identifiable, Codable, Hashable, Sendable {
     ) {
         self.id = id
         self.taskID = taskID
+        self.projectID = projectID
+        self.workspaceID = workspaceID
+        self.actorID = actorID
+        self.principalID = principalID
+        self.taskLeaseID = taskLeaseID
+        self.contextPackID = contextPackID
         self.endpointID = endpointID
         self.actorName = actorName
         self.purpose = purpose
@@ -825,6 +879,16 @@ public struct HandoffRecord: Identifiable, Codable, Hashable, Sendable {
 public struct LedgerEvent: Identifiable, Codable, Hashable, Sendable {
     public var sequence: Int64
     public var id: UUID
+    public var schemaVersion: String?
+    public var projectID: UUID?
+    public var actorID: UUID?
+    public var principalID: UUID?
+    public var workspaceID: UUID?
+    public var artifactID: UUID?
+    public var reviewID: UUID?
+    public var approvalID: UUID?
+    public var commandID: UUID?
+    public var correlationID: UUID?
     public var taskID: UUID?
     public var runID: UUID?
     public var type: String
@@ -836,6 +900,16 @@ public struct LedgerEvent: Identifiable, Codable, Hashable, Sendable {
     public init(
         sequence: Int64 = 0,
         id: UUID = UUID(),
+        schemaVersion: String? = "1.0",
+        projectID: UUID? = nil,
+        actorID: UUID? = nil,
+        principalID: UUID? = nil,
+        workspaceID: UUID? = nil,
+        artifactID: UUID? = nil,
+        reviewID: UUID? = nil,
+        approvalID: UUID? = nil,
+        commandID: UUID? = nil,
+        correlationID: UUID? = nil,
         taskID: UUID? = nil,
         runID: UUID? = nil,
         type: String,
@@ -846,6 +920,16 @@ public struct LedgerEvent: Identifiable, Codable, Hashable, Sendable {
     ) {
         self.sequence = sequence
         self.id = id
+        self.schemaVersion = schemaVersion
+        self.projectID = projectID
+        self.actorID = actorID
+        self.principalID = principalID
+        self.workspaceID = workspaceID
+        self.artifactID = artifactID
+        self.reviewID = reviewID
+        self.approvalID = approvalID
+        self.commandID = commandID
+        self.correlationID = correlationID
         self.taskID = taskID
         self.runID = runID
         self.type = type

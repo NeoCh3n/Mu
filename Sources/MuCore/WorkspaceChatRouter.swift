@@ -64,6 +64,21 @@ public enum WorkspaceChatRouter {
                 endpointAliases["openworker", default: []].append(endpoint)
             case ControlPlaneService.codexRuntimeTypeID:
                 endpointAliases["codex", default: []].append(endpoint)
+                endpointAliases[
+                    "codex-"
+                        + endpoint.id.uuidString
+                        .lowercased().prefix(8),
+                    default: []
+                ].append(endpoint)
+            case ControlPlaneService.claudeCodeRuntimeTypeID:
+                endpointAliases["claude", default: []].append(endpoint)
+                endpointAliases["claudecode", default: []].append(endpoint)
+                endpointAliases[
+                    "claude-"
+                        + endpoint.id.uuidString
+                        .lowercased().prefix(8),
+                    default: []
+                ].append(endpoint)
             default:
                 break
             }
