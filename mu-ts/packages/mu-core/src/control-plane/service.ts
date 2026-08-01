@@ -609,6 +609,8 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
             })
             break
           case 'visible_text':
+            // Visible-text events are deltas; keep accumulating for the
+            // streamed chat. The terminal result below is authoritative.
             output += event.text
             break
           case 'pending_approval':
@@ -725,6 +727,11 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
         taskStatus = 'blocked'
         bindingState = 'awaiting_approval'
         errorMessage = 'Awaiting approval.'
+      }
+      // The harness result carries the authoritative full output; prefer it
+      // over the accumulated deltas (which may include replacement events).
+      if (terminalEvent?.kind === 'completed') {
+        output = terminalEvent.result.output
       }
 
       upsertRun(store, {

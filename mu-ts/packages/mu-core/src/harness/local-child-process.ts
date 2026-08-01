@@ -255,6 +255,9 @@ export class LocalChildProcessHarness implements Harness {
     const queue = new EventQueue<HarnessTurnEvent>()
     const onAbort = () => this.claudeCode().interrupt()
     signal?.addEventListener('abort', onAbort, { once: true })
+    // The stream parser reports cumulative visible text per delta; normalize
+    // to per-delta chunks so consumers can accumulate without duplication.
+    let lastVisible = ''
     try {
       let pending: Promise<HarnessTurnResult>
       try {
@@ -267,7 +270,18 @@ export class LocalChildProcessHarness implements Harness {
             promptOverride: input.promptOverride,
             onSessionStarted: (sessionID) =>
               queue.push({ kind: 'session_started', sessionID }),
-            onVisibleText: (text) => queue.push({ kind: 'visible_text', text }),
+            onVisibleText: (text) => {
+              if (text !== lastVisible) {
+                if (text.length > lastVisible.length && text.startsWith(lastVisible)) {
+                  queue.push({ kind: 'visible_text', text: text.slice(lastVisible.length) })
+                } else {
+                  // Replacement (e.g. an assistant message overriding partial
+                  // deltas): emit the growth relative to the previous text.
+                  queue.push({ kind: 'visible_text', text: text })
+                }
+              }
+              lastVisible = text
+            },
           })
           .then(mapClaudeResult)
       } catch (error) {

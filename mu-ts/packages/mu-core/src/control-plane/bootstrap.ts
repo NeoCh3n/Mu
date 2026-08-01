@@ -43,15 +43,16 @@ export function bootstrapLocalControlPlane(
   })
   const now = options.now ?? (() => new Date())
 
+  // Resolve executables once and feed the same paths to the harness and to
+  // endpoint registration, so the harness can actually drive its endpoints.
+  const claudeExe = options.claudeCodeExecutable ?? claudeCodeExecutableURL()
+  const codexExe = options.codexExecutable ?? codexExecutableURL()
+
   const harness = createHarness({
     mode: 'local',
     local: {
-      ...(options.claudeCodeExecutable !== undefined
-        ? { claudeCodeExecutable: options.claudeCodeExecutable }
-        : {}),
-      ...(options.codexExecutable !== undefined
-        ? { codexExecutable: options.codexExecutable }
-        : {}),
+      ...(claudeExe !== undefined ? { claudeCodeExecutable: claudeExe } : {}),
+      ...(codexExe !== undefined ? { codexExecutable: codexExe } : {}),
     },
   })
 
@@ -87,7 +88,6 @@ export function bootstrapLocalControlPlane(
 
   // Endpoints from discovered executables.
   const endpointIDs: Record<string, string> = {}
-  const claudeExe = options.claudeCodeExecutable ?? claudeCodeExecutableURL()
   if (claudeExe !== undefined) {
     const endpoint = service.registerEndpoint({
       runtimeTypeID: 'anthropic.claude-code/cli',
@@ -97,7 +97,6 @@ export function bootstrapLocalControlPlane(
     })
     endpointIDs.claudeCode = endpoint.id
   }
-  const codexExe = options.codexExecutable ?? codexExecutableURL()
   if (codexExe !== undefined) {
     const endpoint = service.registerEndpoint({
       runtimeTypeID: 'openai.codex/app-server',

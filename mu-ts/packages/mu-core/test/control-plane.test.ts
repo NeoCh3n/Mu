@@ -1,7 +1,9 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { bootstrapLocalControlPlane } from '../src/control-plane/bootstrap.ts'
 import {
   createControlPlaneService,
   type ControlPlaneService,
@@ -454,6 +456,52 @@ describe('ControlPlaneService', () => {
       await expect(runTurn(service, taskID, '')).rejects.toThrow(MuError)
     } finally {
       cleanup()
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Bootstrap: the harness must be wired to the same executables its endpoints
+// advertise (regression: endpoint registered but harness unconfigured).
+// ---------------------------------------------------------------------------
+
+describe('bootstrapLocalControlPlane', () => {
+  it('runs a real turn through the bootstrapped harness and endpoint', async () => {
+    const FAKE_CLAUDE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'support/fake-claude.mjs')
+    fs.chmodSync(FAKE_CLAUDE, 0o755)
+    const repositoryPath = fs.mkdtempSync(path.join(os.tmpdir(), 'mu-boot-'))
+    const dataDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'mu-boot-data-'))
+    try {
+      const bootstrapped = bootstrapLocalControlPlane({
+        dataDirectory,
+        filename: ':memory:',
+        claudeCodeExecutable: FAKE_CLAUDE,
+      })
+      expect(bootstrapped.endpointIDs.claudeCode).toBeTruthy()
+      expect(bootstrapped.harness.capabilities.providers).toContainEqual({ rawValue: 'claude_code' })
+
+      const project = bootstrapped.service.createProject({
+        displayName: 'Boot',
+        ownerPrincipalID: 'local-user' as never,
+      })
+      const task = bootstrapped.service.createTask({
+        projectID: project.id,
+        title: 'Boot task',
+        objective: 'Verify bootstrap wiring',
+        repositoryPath,
+      })
+      const events = []
+      for await (const event of bootstrapped.service.runTaskTurn({ taskID: task.id, text: 'Go.' })) {
+        events.push(event)
+      }
+      expect(bootstrapped.service.fetchTask(task.id)?.status).toBe('completed')
+      const runs = bootstrapped.service.listRuns(task.id)
+      expect(runs[0]?.state).toBe('completed')
+      expect(runs[0]?.nativeOutput).toContain('renderer')
+      expect(events.at(-1)?.kind).toBe('chat_entry')
+    } finally {
+      fs.rmSync(repositoryPath, { recursive: true, force: true })
+      fs.rmSync(dataDirectory, { recursive: true, force: true })
     }
   })
 })
