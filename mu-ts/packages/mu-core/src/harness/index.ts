@@ -14,6 +14,7 @@ import type { Harness, HarnessMode } from './types.ts'
 export * from './types.ts'
 export * from './local-child-process.ts'
 export * from './qm-http.ts'
+export * from './qm-mapping.ts'
 
 export interface HarnessConfiguration {
   readonly mode: HarnessMode

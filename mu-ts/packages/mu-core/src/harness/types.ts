@@ -123,9 +123,12 @@ export interface HarnessTurnInput {
   readonly sessionID?: string
   readonly resumeSessionID?: string
   readonly promptOverride?: string
+  /** User message text (QM mode derives its turn request from this). */
+  readonly text?: string
   /** Local-mode context: task + bounded Context Pack used to build the prompt. */
   readonly task?: TaskRecord
   readonly contextPack?: ProjectContextPackRecord
+  /** QM-mode fields; when absent, QM mode derives them from task/contextPack/text. */
   readonly qm?: QMHarnessTurnInput
 }
 

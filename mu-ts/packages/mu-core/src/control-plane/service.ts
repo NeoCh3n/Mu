@@ -584,6 +584,7 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
         provider: providerFor(endpoint),
         task,
         contextPack: pack,
+        text: params.text,
         sessionID: params.sessionID,
         resumeSessionID: params.resumeSessionID,
         promptOverride: params.promptOverride,

@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto'
 import { MuError } from '../errors.ts'
 import { provider } from '../types.ts'
+import { qmTurnRequestForMu } from './qm-mapping.ts'
 import type {
   Harness,
   HarnessArtifactRecord,
@@ -278,9 +279,27 @@ export class QMHTTPHarness implements Harness {
     input: HarnessTurnInput,
     signal?: AbortSignal,
   ): AsyncIterable<HarnessTurnEvent> {
-    const qm = input.qm
+    let qm = input.qm
     if (qm === undefined) {
-      throw MuError.invalidTransition('QMHTTPHarness requires input.qm in QM mode.')
+      // Phase 8 mapping: derive the QM turn request from Mu's task, bounded
+      // Context Pack, and user text.
+      if (input.task === undefined || input.contextPack === undefined || input.text === undefined) {
+        throw MuError.invalidTransition(
+          'QMHTTPHarness requires input.qm, or task + contextPack + text in QM mode.',
+        )
+      }
+      qm = qmTurnRequestForMu({
+        surface: this.surface,
+        task: input.task,
+        contextPack: input.contextPack,
+        text: input.text,
+        agentName: 'Mu Agent',
+        actorExternalID: 'mu',
+        threadRef: input.sessionID,
+        model: input.qm?.model,
+        readOnly: true,
+        idempotencyKey: input.qm?.idempotencyKey,
+      })
     }
     if (!isStrongSigningSecret(this.sourceSecret)) {
       yield { kind: 'failed', errorMessage: `QM signing secret must be at least ${MIN_SIGNING_SECRET_LENGTH} characters.` }
