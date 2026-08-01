@@ -1,5 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { MuError } from '../errors.ts'
 import type { CodexProbeResult, CodexReplanResult, CodexTurnResult, TaskRecord } from '../models.ts'
 import type { ProjectContextPackRecord } from '../project-kernel/index.ts'
@@ -1015,17 +1017,48 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-/** Codex executable discovery, mirroring CodexDiscovery.swift. */
-export function codexExecutableURL(): string | undefined {
+/**
+ * Codex executable discovery, mirroring CodexDiscovery.swift. Prefers an
+ * explicitly configured executable, then standalone Codex builds on PATH or
+ * in standard install locations, and only falls back to the Codex binary
+ * bundled inside the ChatGPT desktop app (its app-server stdio handshake is
+ * known to hang, so it is a last resort rather than the primary discovery).
+ */
+export function codexExecutableURL(
+  environment: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  for (const key of ['MU_CODEX_EXECUTABLE', 'CODEX_EXECUTABLE']) {
+    const value = environment[key]?.trim()
+    if (value !== undefined && value !== '' && isExecutableFile(value)) {
+      return canonicalize(value)
+    }
+  }
+  const home = os.homedir()
   const candidates = [
-    '/Applications/ChatGPT.app/Contents/Resources/codex',
-    '/Applications/Codex.app/Contents/Resources/codex',
+    path.join(home, '.codex/bin/codex'),
     '/opt/homebrew/bin/codex',
     '/usr/local/bin/codex',
     '/usr/bin/codex',
   ]
+  const pathEnv = environment['PATH'] ?? ''
+  for (const dir of pathEnv.split(':')) {
+    if (dir !== '') candidates.push(path.join(dir, 'codex'))
+  }
+  candidates.push(
+    '/Applications/Codex.app/Contents/Resources/codex',
+    '/Applications/ChatGPT.app/Contents/Resources/codex',
+  )
+  const seen = new Set<string>()
   for (const candidate of candidates) {
-    if (isExecutableFile(candidate)) return candidate
+    if (seen.has(candidate)) continue
+    seen.add(candidate)
+    if (isExecutableFile(candidate)) {
+      return canonicalize(candidate)
+    }
   }
   return undefined
+}
+
+function canonicalize(p: string): string {
+  return fs.realpathSync(p)
 }
