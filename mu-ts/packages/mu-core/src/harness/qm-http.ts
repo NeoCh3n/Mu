@@ -14,6 +14,22 @@ import type {
 } from './types.ts'
 
 // ---------------------------------------------------------------------------
+// ⚠️ EXPERIMENTAL QM BRIDGE — NOT VERIFIED AGAINST UPSTREAM QM.
+//
+// This client speaks Mu's own interpretation of a QM-like control surface
+// (HMAC source auth + POST /v1/turns + run signal + session-state SSE),
+// derived from the QM reference checkout at /tmp/qm-ref. It is tested ONLY
+// against Mu's mock QM server. It is NOT an accepted integration with any
+// pinned upstream QM release, and MUST NOT be described as such until a real
+// contract acceptance against a fixed QM version has passed.
+//
+// QM integration direction: QM is an optional organizational Agent host.
+// The bridge passes only bounded Mu Context Packs; QM output returns to Mu
+// as Candidate/Artifact and must pass Mu review. QM Memory/sandbox/keychain
+// are never Mu's canonical context or permission truth source.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // QM source authentication (byte-compatible with QM's source-auth-sign.ts:
 //   signature = v0=hex(hmac-sha256(secret, "v0:<timestampSec>:<canonical>"))
 //   canonical = "<method>\n<pathWithQuery>\n<body>"

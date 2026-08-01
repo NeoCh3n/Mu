@@ -13,7 +13,7 @@ import { startMockQMServer, type MockQMServer } from './support/mock-qm-server.t
 
 const SECRET = 'test-source-secret-abcdefghijklmnopqrstuvwxyz-0123456789'
 
-describe('Phase 8: Mu → QM TurnRequest mapping', () => {
+describe('Experimental QM Bridge: Mu → QM TurnRequest mapping (mock contract)', () => {
   it('maps a bounded Context Pack into a QM turn request', () => {
     const task = createTaskRecord({
       title: 'Inspect widget',
@@ -49,7 +49,7 @@ describe('Phase 8: Mu → QM TurnRequest mapping', () => {
   })
 })
 
-describe('Phase 8: QM mode end-to-end through the control plane', () => {
+describe('Experimental QM Bridge: control plane end-to-end against the mock QM server', () => {
   function makeService(mock: MockQMServer): { service: ControlPlaneService; cleanup: () => void } {
     const dataDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'mu-qm-'))
     const store = new SQLiteStore({ dataDirectory, filename: ':memory:' })

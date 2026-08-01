@@ -116,9 +116,11 @@ migration phases are implemented and tested:
    turns/context/approvals/handoffs/ledger routes and an SSE event stream
 7. **Web UI**: React + Vite + Tailwind — sidebar, task workspace with live chat,
    runs, artifacts, handoffs, ledger
-8. **QM integration**: Mu ContextPack → QM TurnRequest mapping, QM-mode
-   end-to-end tests, and a Swift data migration helper
-   (`node scripts/migrate-swift.ts`)
+8. **Experimental QM Bridge** (not verified against upstream QM): Mu
+   ContextPack → QM TurnRequest mapping and a QM HTTP client tested only
+   against Mu's mock server — treated as experimental until real contract
+   acceptance against a pinned QM release; plus a Swift data migration
+   helper (`node scripts/migrate-swift.ts`)
 
 ```sh
 cd mu-ts

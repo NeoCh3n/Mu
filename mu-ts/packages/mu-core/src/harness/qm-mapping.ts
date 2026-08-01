@@ -3,12 +3,14 @@ import { renderedContextPackMarkdown, type ProjectContextPackRecord } from '../p
 import type { QMHarnessTurnInput } from './types.ts'
 
 // ---------------------------------------------------------------------------
-// Mu → QM TurnRequest mapping (Phase 8).
+// Mu → QM TurnRequest mapping (Experimental QM Bridge).
 //
-// Mu's bounded Context Pack becomes QM's system prompt; the user message is
-// appended as the turn text. The conversation thread is the Mu task ID, so
-// follow-ups on the same task resume the same QM thread. Mu always asserts a
-// bot actor with its agent display name.
+// Part of the Experimental QM Bridge (see qm-http.ts): Mu's bounded Context
+// Pack becomes QM's system prompt; the user message is appended as the turn
+// text. The conversation thread is the Mu task ID, so follow-ups on the same
+// task resume the same QM thread. Mu always asserts a bot actor with its
+// agent display name. Only bounded Packs cross this bridge; QM output re-
+// enters Mu as Candidate/Artifact and must pass Mu review.
 // ---------------------------------------------------------------------------
 
 export interface MuToQMTurnMapping {
