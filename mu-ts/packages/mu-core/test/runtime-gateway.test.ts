@@ -17,7 +17,6 @@ import {
 import {
   claudeCodeRuntimeTypeID,
   codexRuntimeTypeID,
-  openWorkerRuntimeTypeID,
   RuntimeCapability,
 } from '../src/types.ts'
 
@@ -55,18 +54,6 @@ describe('RuntimeGateway registry', () => {
       status: 'active',
       guaranteeNote: 'cli',
     }))?.adapterID).toBe('mu.runtime.claude-code-cli')
-    expect(adapterFor(createRuntimeEndpoint({
-      runtimeTypeID: openWorkerRuntimeTypeID,
-      displayName: 'OpenWorker',
-      adapterVersion: '0.1',
-      runtimeVersion: '0.1',
-      location: 'local',
-      provenance: 'vendor_protocol',
-      permissionModel: 'fine_grained',
-      capabilities: new Set(),
-      status: 'active',
-      guaranteeNote: 'sidecar',
-    }))?.adapterID).toBe('mu.runtime.openworker-sidecar')
   })
 
   it('declares the Codex manifest with mirrored-stream fidelity', () => {
