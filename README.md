@@ -96,6 +96,38 @@ content-addressed evidence store and append-only ledger. Exact-workspace read-on
 continuations and interruption use the same native thread. Mu does not claim Codex
 workspace writes or Runtime approval interception.
 
+## TypeScript rewrite (mu-ts)
+
+A TypeScript implementation of the Mu control plane lives in [`mu-ts/`](mu-ts/)
+(pnpm monorepo), schema-compatible with the Swift SQLite store. All eight
+migration phases are implemented and tested:
+
+1. **Core domain layer** (`mu-core`): enums, record types, UUID/SHA-256, errors,
+   Project Kernel, Context Kernel, Runtime Gateway manifests
+2. **Persistence**: SQLite store (Swift-compatible `encodeMuJSON`), CAS
+   artifact store, Git probe, domain record APIs
+3. **Runtime clients**: Claude Code `stream-json` CLI, Codex App Server
+   (stdio JSON-RPC), OpenWorker HTTP client
+4. **Harness abstraction**: `Harness` interface with `LocalChildProcessHarness`
+   and `QMHTTPHarness` (HMAC source auth, `/v1/turns`, SSE session states)
+5. **Control plane**: `ControlPlaneService` — tasks, fencing leases, Context
+   Packs with `contentSHA256`, turn dispatch, approvals, reviews, handoffs, ledger
+6. **Server + API**: Fastify `buildApp(config)` with projects/agents/tasks/
+   turns/context/approvals/handoffs/ledger routes and an SSE event stream
+7. **Web UI**: React + Vite + Tailwind — sidebar, task workspace with live chat,
+   runs, artifacts, handoffs, ledger
+8. **QM integration**: Mu ContextPack → QM TurnRequest mapping, QM-mode
+   end-to-end tests, and a Swift data migration helper
+   (`node scripts/migrate-swift.ts`)
+
+```sh
+cd mu-ts
+pnpm install
+pnpm -r test        # 195 tests
+pnpm -r typecheck
+pnpm --filter @mu/server start   # requires a runtime executable
+```
+
 ## Requirements
 
 - macOS 14 or newer

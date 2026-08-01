@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "start": "node --experimental-strip-types src/index.ts"
   },
   "dependencies": {
     "@mu/core": "workspace:*",
