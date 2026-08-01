@@ -125,8 +125,15 @@ cd mu-ts
 pnpm install
 pnpm -r test        # 195 tests
 pnpm -r typecheck
-pnpm --filter @mu/server start   # requires a runtime executable
+pnpm --filter @mu/ui build       # build the web UI once
+pnpm --filter @mu/server start   # one process = the whole app
+# open http://127.0.0.1:4000 — the server also hosts the built UI
 ```
+
+The server doubles as the app: after `pnpm --filter @mu/ui build`, opening
+`http://127.0.0.1:4000` serves the React UI plus the API from one process.
+Run `pnpm --filter @mu/ui dev` instead for live UI development (Vite proxies
+to the server on port 4000).
 
 ## Requirements
 
