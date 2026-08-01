@@ -290,6 +290,7 @@ export class ClaudeCodeClient {
     sessionID?: string
     resumeSessionID?: string
     promptOverride?: string
+    reasoningEffort?: string
     onSessionStarted?: (sessionID: string) => void
     onVisibleText?: (text: string) => void
   }): Promise<ClaudeCodeTurnResult> {
@@ -312,6 +313,7 @@ export class ClaudeCodeClient {
       sessionID,
       resumeSessionID: params.resumeSessionID,
       promptOverride: params.promptOverride,
+      reasoningEffort: params.reasoningEffort,
     })
     const process = spawn(this.executableURL, args, {
       cwd: params.task.repositoryPath,
@@ -385,6 +387,7 @@ export function claudeCodeArguments(params: {
   sessionID: string
   resumeSessionID?: string
   promptOverride?: string
+  reasoningEffort?: string
 }): string[] {
   const values: string[] = [
     '--print',
@@ -404,9 +407,22 @@ export function claudeCodeArguments(params: {
   } else {
     values.push('--session-id', params.sessionID)
   }
+  const effort = claudeEffort(params.reasoningEffort)
+  if (effort !== undefined) values.push('--effort', effort)
   const prompt = params.promptOverride ?? renderedContextPackMarkdown(params.contextPack)
   values.push(prompt)
   return values
+}
+
+/** Mu's `ultra` maps to Claude Code's current `max` CLI effort. */
+function claudeEffort(value: string | undefined): 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined {
+  switch (value) {
+    case 'low': return 'low'
+    case 'medium': return 'medium'
+    case 'high': return 'high'
+    case 'ultra': return 'max'
+    default: return undefined
+  }
 }
 
 // ---------------------------------------------------------------------------

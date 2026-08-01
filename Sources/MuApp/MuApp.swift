@@ -32,18 +32,6 @@ struct MuApp: App {
                     store.section = .tasks
                 }
                 .keyboardShortcut("3", modifiers: .command)
-                Button("Handoffs") {
-                    store.section = .handoffs
-                }
-                .keyboardShortcut("4", modifiers: .command)
-                Button("Runtimes") {
-                    store.section = .runtimes
-                }
-                .keyboardShortcut("5", modifiers: .command)
-                Button("Ledger") {
-                    store.section = .ledger
-                }
-                .keyboardShortcut("6", modifiers: .command)
                 Divider()
                 Button("Refresh") {
                     store.reload()

@@ -13,7 +13,7 @@ enum WorkspaceSurface: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     var title: String {
-        rawValue.capitalized
+        self == .artifacts ? "Review" : rawValue.capitalized
     }
 
     var symbol: String {
@@ -31,23 +31,27 @@ struct AgentWorkspaceView: View {
     @EnvironmentObject private var store: AppStore
     let task: TaskRecord
     @State private var surface: WorkspaceSurface = .chat
+    @State private var showingEnvironment = false
 
     var body: some View {
         VStack(spacing: 0) {
             workspaceHeader
-            surfaceBar
-            Divider()
-
-            HStack(spacing: 0) {
-                surfaceContent
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
+                surfaceBar
                 Divider()
 
-                WorkspaceInspector(task: task)
-                    .frame(minWidth: 250, idealWidth: 285, maxWidth: 320)
+                HStack(spacing: 0) {
+                    surfaceContent
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    if showingEnvironment {
+                        Divider()
+
+                        WorkspaceInspector(task: task)
+                            .frame(minWidth: 250, idealWidth: 285, maxWidth: 320)
+                            .transition(.move(edge: .trailing).combined(with: .opacity))
+                    }
+                }
             }
-        }
         .background(Color(nsColor: .textBackgroundColor).opacity(0.28))
     }
 
@@ -124,28 +128,72 @@ struct AgentWorkspaceView: View {
 
     private var surfaceBar: some View {
         HStack(spacing: 5) {
-            ForEach(WorkspaceSurface.allCases) { item in
-                Button {
-                    surface = item
-                } label: {
-                    Label(item.title, systemImage: item.symbol)
-                        .font(.caption.weight(.semibold))
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                        .background(
-                            surface == item
-                                ? MuPalette.violet.opacity(0.12)
-                                : Color.clear,
-                            in: RoundedRectangle(cornerRadius: 8)
-                        )
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(surface == item ? MuPalette.violet : .secondary)
-                .layoutPriority(1)
+            Button {
+                surface = .chat
+            } label: {
+                Label("Chat", systemImage: WorkspaceSurface.chat.symbol)
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(
+                        surface == .chat
+                            ? MuPalette.violet.opacity(0.12)
+                            : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 8)
+                    )
             }
+            .buttonStyle(.plain)
+            .foregroundStyle(surface == .chat ? MuPalette.violet : .secondary)
+
+            Menu {
+                Section("Workspace tools") {
+                    ForEach(WorkspaceSurface.allCases.filter { $0 != .chat }) { item in
+                        Button {
+                            surface = item
+                        } label: {
+                            Label(item.title, systemImage: item.symbol)
+                        }
+                    }
+                }
+                Divider()
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        showingEnvironment = true
+                    }
+                } label: {
+                    Label("Environment", systemImage: "sidebar.right")
+                }
+            } label: {
+                Label("Tools", systemImage: "square.grid.2x2")
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+            }
+            .menuStyle(.borderlessButton)
+            .foregroundStyle(.secondary)
+
             Spacer()
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    showingEnvironment.toggle()
+                }
+            } label: {
+                Label(
+                    showingEnvironment ? "Hide Environment" : "Environment",
+                    systemImage: showingEnvironment ? "sidebar.right" : "sidebar.right"
+                )
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(
+                    showingEnvironment
+                        ? MuPalette.violet.opacity(0.12)
+                        : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 8)
+                )
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(showingEnvironment ? MuPalette.violet : .secondary)
             Text(task.repositoryPath)
                 .font(.caption2.monospaced())
                 .foregroundStyle(.tertiary)
@@ -439,7 +487,7 @@ private struct WorkspaceChatSurface: View {
                     .onSubmit(send)
                     Button(action: send) {
                         Label(
-                            message.contains("@") ? "Route" : "Save note",
+                            message.contains("@") ? "Route" : "Send",
                             systemImage: "paperplane.fill"
                         )
                     }
@@ -3416,11 +3464,14 @@ private struct WorkspaceInspector: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Task context")
+                    Text("Environment")
                         .font(.headline)
-                    Text("Task identity, runtime, and portable state")
+                    Text("Project state, Agents, runtime, and portable context")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    Label("State saves continuously", systemImage: "checkmark.circle.fill")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(MuPalette.mint)
                 }
 
                 inspectorSection("OBJECTIVE") {

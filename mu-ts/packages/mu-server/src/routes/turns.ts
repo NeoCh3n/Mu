@@ -8,6 +8,9 @@ interface TurnBody {
   readonly promptOverride?: string
   readonly sessionID?: string
   readonly resumeSessionID?: string
+  readonly contextPackID?: string
+  readonly contextRecordIDs?: readonly string[]
+  readonly reasoningEffort?: string
 }
 
 interface InterruptBody {
@@ -21,7 +24,7 @@ interface InterruptBody {
  */
 export function startTurn(
   ctx: RouteContext,
-  params: { taskID: string; text: string; endpointID?: string; promptOverride?: string; sessionID?: string; resumeSessionID?: string },
+  params: { taskID: string; text: string; endpointID?: string; promptOverride?: string; sessionID?: string; resumeSessionID?: string; contextPackID?: string; contextRecordIDs?: readonly string[]; reasoningEffort?: string },
 ): Promise<RunRecord> {
   const { service, hub } = ctx
   return new Promise<RunRecord>((resolve, reject) => {
@@ -43,6 +46,9 @@ export function startTurn(
       promptOverride: params.promptOverride,
       sessionID: params.sessionID,
       resumeSessionID: params.resumeSessionID,
+      contextPackID: params.contextPackID as never,
+      contextRecordIDs: params.contextRecordIDs as never,
+      reasoningEffort: params.reasoningEffort as never,
     })
 
     void (async () => {
@@ -84,6 +90,9 @@ export function registerTurnsRoutes(app: FastifyInstance, ctx: RouteContext): vo
       promptOverride: body.promptOverride,
       sessionID: body.sessionID,
       resumeSessionID: body.resumeSessionID,
+      contextPackID: body.contextPackID,
+      contextRecordIDs: body.contextRecordIDs,
+      reasoningEffort: body.reasoningEffort as never,
     })
     return { runID: run.id, taskID: run.taskID, state: run.state }
   })

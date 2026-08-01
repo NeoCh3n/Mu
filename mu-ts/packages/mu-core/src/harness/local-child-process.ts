@@ -5,7 +5,10 @@ import type {
   CodexTurnResult,
   TaskRecord,
 } from '../models.ts'
-import type { ExternalConversationCandidate } from '../conversation-history.ts'
+import type {
+  ExternalConversationCandidate,
+  ExternalConversationMessage,
+} from '../conversation-history.ts'
 import type { ProjectContextPackRecord } from '../project-kernel/index.ts'
 import { renderedContextPackMarkdown } from '../project-kernel/index.ts'
 import {
@@ -17,6 +20,7 @@ import { CodexAppServerClient } from '../runtime-clients/codex.ts'
 import {
   CLAUDE_CODE_PROVIDER,
   CODE_PROVIDER,
+  type AgentRuntimeEndpointScope,
   type ConversationProvider,
   providerEqual,
 } from '../types.ts'
@@ -43,6 +47,7 @@ export interface ClaudeCodeClientLike {
     sessionID?: string
     resumeSessionID?: string
     promptOverride?: string
+    reasoningEffort?: string
     onSessionStarted?: (sessionID: string) => void
     onVisibleText?: (text: string) => void
   }): Promise<ClaudeCodeTurnResult>
@@ -51,11 +56,19 @@ export interface ClaudeCodeClientLike {
 
 export interface CodexClientLike {
   probe(): Promise<CodexProbeResult>
+  /** Starts the persistent app-server without creating a thread. */
+  warm?(): Promise<void>
   listHistory(workspacePath: string, timeoutMs?: number): Promise<ExternalConversationCandidate[]>
+  readHistory?(
+    sessionID: string,
+    workspacePath: string,
+    timeoutMs?: number,
+  ): Promise<ExternalConversationMessage[]>
   runReadOnlyTask(params: {
     task: TaskRecord
     contextPack?: ProjectContextPackRecord
     promptOverride?: string
+    reasoningEffort?: string
     clientUserMessageID: string
     timeoutMs?: number
     onThreadStarted?: (threadID: string) => void
@@ -67,6 +80,7 @@ export interface CodexClientLike {
     task: TaskRecord
     prompt: string
     clientUserMessageID: string
+    reasoningEffort?: string
     timeoutMs?: number
     onTurnStarted?: (threadID: string, turnID: string) => void
     onVisibleText?: (text: string) => void
@@ -109,16 +123,16 @@ class EventQueue<T> {
 
 /**
  * Local mode: drives the Phase 3 runtime clients as child processes.
- * One active turn at a time per harness instance — the control plane creates
- * one harness per runtime endpoint and serializes turns on it.
+ * Endpoint-scoped clients keep separate Codex app-server processes and Claude
+ * session state for distinct stable instance keys.
  */
 export class LocalChildProcessHarness implements Harness {
   readonly capabilities: HarnessCapabilities
 
   private readonly options: LocalChildProcessHarnessOptions
-  private claudeCodeClient?: ClaudeCodeClientLike
-  private codexClient?: CodexClientLike
-  private activeCodex?: { threadID: string; turnID: string }
+  private readonly claudeCodeClients = new Map<string, ClaudeCodeClientLike>()
+  private readonly codexClients = new Map<string, CodexClientLike>()
+  private readonly activeCodex = new Map<string, { threadID: string; turnID: string }>()
 
   constructor(options: LocalChildProcessHarnessOptions = {}) {
     this.options = options
@@ -135,7 +149,7 @@ export class LocalChildProcessHarness implements Harness {
       supportsEventStream: true,
       notes: [
         'Runs Agent CLI executables as child processes.',
-        'One active turn per harness instance.',
+        'Endpoint-scoped clients keep terminal/app-server state isolated.',
         'Artifact listing arrives with the Phase 5 control plane.',
       ],
     }
@@ -156,8 +170,13 @@ export class LocalChildProcessHarness implements Harness {
     if (executableURL === undefined || executableURL === '') {
       throw MuError.capabilityMissing('LocalChildProcessHarness: Claude Code executable is not configured.')
     }
-    this.claudeCodeClient ??= new ClaudeCodeClient({ executableURL })
-    return this.claudeCodeClient
+    const key = 'default'
+    let client = this.claudeCodeClients.get(key)
+    if (client === undefined) {
+      client = new ClaudeCodeClient({ executableURL })
+      this.claudeCodeClients.set(key, client)
+    }
+    return client
   }
 
   private codex(): CodexClientLike {
@@ -167,8 +186,55 @@ export class LocalChildProcessHarness implements Harness {
     if (executableURL === undefined || executableURL === '') {
       throw MuError.capabilityMissing('LocalChildProcessHarness: Codex executable is not configured.')
     }
-    this.codexClient ??= new CodexAppServerClient({ executableURL })
-    return this.codexClient
+    const key = 'default'
+    let client = this.codexClients.get(key)
+    if (client === undefined) {
+      client = new CodexAppServerClient({ executableURL })
+      this.codexClients.set(key, client)
+    }
+    return client
+  }
+
+  private endpointKey(scope: AgentRuntimeEndpointScope): string {
+    return scope.instanceIdentity.stableInstanceKey.trim() || scope.endpointID
+  }
+
+  private claudeCodeFor(scope: AgentRuntimeEndpointScope): ClaudeCodeClientLike {
+    const injected = this.options.claudeCodeClient
+    if (injected !== undefined) return injected
+    const executableURL = this.options.claudeCodeExecutable
+    if (executableURL === undefined || executableURL === '') {
+      throw MuError.capabilityMissing('LocalChildProcessHarness: Claude Code executable is not configured.')
+    }
+    const key = this.endpointKey(scope)
+    let client = this.claudeCodeClients.get(key)
+    if (client === undefined) {
+      client = new ClaudeCodeClient({ executableURL })
+      this.claudeCodeClients.set(key, client)
+    }
+    return client
+  }
+
+  private codexFor(scope: AgentRuntimeEndpointScope): CodexClientLike {
+    const injected = this.options.codexClient
+    if (injected !== undefined) return injected
+    const executableURL = this.options.codexExecutable
+    if (executableURL === undefined || executableURL === '') {
+      throw MuError.capabilityMissing('LocalChildProcessHarness: Codex executable is not configured.')
+    }
+    const key = this.endpointKey(scope)
+    let client = this.codexClients.get(key)
+    if (client === undefined) {
+      client = new CodexAppServerClient({ executableURL })
+      this.codexClients.set(key, client)
+    }
+    return client
+  }
+
+  async warmEndpoint(scope: AgentRuntimeEndpointScope): Promise<void> {
+    if (!providerEqual(scope.instanceIdentity.provider, CODE_PROVIDER)) return
+    if (!this.hasCodex()) return
+    await this.codexFor(scope).warm?.()
   }
 
   async probe(): Promise<HarnessProbeResult> {
@@ -213,15 +279,74 @@ export class LocalChildProcessHarness implements Harness {
     }
   }
 
+  /** Probe only the runtime represented by this endpoint. */
+  async probeEndpoint(scope: AgentRuntimeEndpointScope): Promise<HarnessProbeResult> {
+    const startedAt = Date.now()
+    const provider = scope.instanceIdentity.provider
+    try {
+      if (providerEqual(provider, CLAUDE_CODE_PROVIDER)) {
+        if (!this.hasClaudeCode()) {
+          return {
+            ok: false,
+            mode: 'local',
+            message: 'Claude Code executable is unavailable for this endpoint.',
+            latencyMilliseconds: Date.now() - startedAt,
+          }
+        }
+        const result = this.claudeCodeFor(scope).probe()
+        return {
+          ok: result.loggedIn,
+          mode: 'local',
+          runtimeVersion: result.version,
+          loggedIn: result.loggedIn,
+          message: `Claude Code ${result.version} (logged in: ${result.loggedIn}).`,
+          latencyMilliseconds: Date.now() - startedAt,
+        }
+      }
+      if (providerEqual(provider, CODE_PROVIDER)) {
+        if (!this.hasCodex()) {
+          return {
+            ok: false,
+            mode: 'local',
+            message: 'Codex executable is unavailable for this endpoint.',
+            latencyMilliseconds: Date.now() - startedAt,
+          }
+        }
+        const result = await this.codexFor(scope).probe()
+        return {
+          ok: result.signedIn,
+          mode: 'local',
+          runtimeVersion: result.userAgent,
+          loggedIn: result.signedIn,
+          message: `Codex ${result.userAgent} (signed in: ${result.signedIn}).`,
+          latencyMilliseconds: Date.now() - startedAt,
+        }
+      }
+      return {
+        ok: false,
+        mode: 'local',
+        message: `Provider '${provider.rawValue}' is not supported by the local harness.`,
+        latencyMilliseconds: Date.now() - startedAt,
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        mode: 'local',
+        message: error instanceof Error ? error.message : String(error),
+        latencyMilliseconds: Date.now() - startedAt,
+      }
+    }
+  }
+
   async *runTurn(input: HarnessTurnInput, signal?: AbortSignal): AsyncIterable<HarnessTurnEvent> {
     const provider = input.provider
     if (provider === undefined) {
       throw MuError.invalidTransition('LocalChildProcessHarness requires an input.provider.')
     }
     if (providerEqual(provider, CLAUDE_CODE_PROVIDER)) {
-      yield* this.runClaudeTurn(input, signal)
+      yield* this.runClaudeTurn(input, signal, this.claudeCode(), 'default')
     } else if (providerEqual(provider, CODE_PROVIDER)) {
-      yield* this.runCodexTurn(input, signal)
+      yield* this.runCodexTurn(input, signal, this.codex(), 'default')
     } else {
       throw MuError.capabilityMissing(
         `LocalChildProcessHarness does not support provider '${provider.rawValue}'.`,
@@ -229,8 +354,29 @@ export class LocalChildProcessHarness implements Harness {
     }
   }
 
+  async *runTurnForEndpoint(
+    scope: AgentRuntimeEndpointScope,
+    input: HarnessTurnInput,
+    signal?: AbortSignal,
+  ): AsyncIterable<HarnessTurnEvent> {
+    const provider = scope.instanceIdentity.provider
+    if (input.provider !== undefined && !providerEqual(input.provider, provider)) {
+      throw MuError.invalidTransition(
+        `Endpoint ${scope.endpointID} is bound to '${provider.rawValue}', not '${input.provider.rawValue}'.`,
+      )
+    }
+    const key = this.endpointKey(scope)
+    if (providerEqual(provider, CLAUDE_CODE_PROVIDER)) {
+      yield* this.runClaudeTurn({ ...input, provider }, signal, this.claudeCodeFor(scope), key)
+    } else if (providerEqual(provider, CODE_PROVIDER)) {
+      yield* this.runCodexTurn({ ...input, provider }, signal, this.codexFor(scope), key)
+    } else {
+      throw MuError.capabilityMissing(`Local harness does not support '${provider.rawValue}'.`)
+    }
+  }
+
   async interrupt(sessionID: string): Promise<void> {
-    const active = this.activeCodex
+    const active = this.activeCodex.get('default')
     if (active !== undefined && sessionID === active.threadID) {
       await this.codex().interrupt(active.threadID, active.turnID)
     } else {
@@ -239,13 +385,43 @@ export class LocalChildProcessHarness implements Harness {
     }
   }
 
+  async interruptForEndpoint(scope: AgentRuntimeEndpointScope, sessionID: string): Promise<void> {
+    const provider = scope.instanceIdentity.provider
+    const key = this.endpointKey(scope)
+    if (providerEqual(provider, CODE_PROVIDER)) {
+      const active = this.activeCodex.get(key)
+      if (active === undefined || sessionID !== active.threadID) {
+        throw MuError.invalidTransition(`No active Codex turn belongs to endpoint ${scope.endpointID}.`)
+      }
+      await this.codexFor(scope).interrupt(active.threadID, active.turnID)
+      return
+    }
+    if (providerEqual(provider, CLAUDE_CODE_PROVIDER)) {
+      this.claudeCodeFor(scope).interrupt()
+      return
+    }
+    throw MuError.capabilityMissing(`Local harness cannot interrupt '${provider.rawValue}'.`)
+  }
+
   /** Stops long-lived clients (e.g. the Codex app-server child process). */
   stop(): void {
-    this.codexClient?.stop()
+    const clients = new Set(this.codexClients.values())
+    for (const client of clients) client.stop()
   }
 
   async listArtifacts(_sessionID: string): Promise<HarnessArtifactRecord[]> {
     return []
+  }
+
+  async listArtifactsForEndpoint(
+    scope: AgentRuntimeEndpointScope,
+    sessionID: string,
+  ): Promise<HarnessArtifactRecord[]> {
+    if (!providerEqual(scope.instanceIdentity.provider, CODE_PROVIDER)
+      && !providerEqual(scope.instanceIdentity.provider, CLAUDE_CODE_PROVIDER)) {
+      throw MuError.capabilityMissing(`Local harness cannot list artifacts for '${scope.instanceIdentity.provider.rawValue}'.`)
+    }
+    return this.listArtifacts(sessionID)
   }
 
   /**
@@ -261,14 +437,53 @@ export class LocalChildProcessHarness implements Harness {
     return []
   }
 
+  async discoverHistoryForEndpoint(
+    scope: AgentRuntimeEndpointScope,
+    workspacePath: string,
+  ): Promise<ExternalConversationCandidate[]> {
+    if (!providerEqual(scope.instanceIdentity.provider, CODE_PROVIDER)) return []
+    if (!this.hasCodex()) return []
+    return this.codexFor(scope).listHistory(workspacePath, 30_000)
+  }
+
+  async hydrateHistoryForEndpoint(
+    scope: AgentRuntimeEndpointScope,
+    candidate: ExternalConversationCandidate,
+  ): Promise<ExternalConversationCandidate> {
+    if (!providerEqual(scope.instanceIdentity.provider, CODE_PROVIDER)) {
+      throw MuError.capabilityMissing(
+        `History hydration is not available for '${scope.instanceIdentity.provider.rawValue}'.`,
+      )
+    }
+    const client = this.codexFor(scope)
+    const readHistory = client.readHistory
+    if (readHistory === undefined) {
+      throw MuError.capabilityMissing('Codex history hydration is not available for this client.')
+    }
+    const messages = await readHistory.call(
+      client,
+      candidate.nativeSessionID,
+      candidate.canonicalWorkspacePath,
+      30_000,
+    )
+    return {
+      ...candidate,
+      messages,
+      discoveredMessageCount: messages.length,
+      runtimeInstanceIdentity: scope.instanceIdentity,
+    }
+  }
+
   // -- Claude ---------------------------------------------------------------
 
   private async *runClaudeTurn(
     input: HarnessTurnInput,
     signal?: AbortSignal,
+    client: ClaudeCodeClientLike = this.claudeCode(),
+    _endpointKey = 'default',
   ): AsyncIterable<HarnessTurnEvent> {
     const queue = new EventQueue<HarnessTurnEvent>()
-    const onAbort = () => this.claudeCode().interrupt()
+    const onAbort = () => client.interrupt()
     signal?.addEventListener('abort', onAbort, { once: true })
     // The stream parser reports cumulative visible text per delta; normalize
     // to per-delta chunks so consumers can accumulate without duplication.
@@ -276,13 +491,14 @@ export class LocalChildProcessHarness implements Harness {
     try {
       let pending: Promise<HarnessTurnResult>
       try {
-        pending = this.claudeCode()
+        pending = client
           .runReadOnlyTask({
             task: requireTask(input),
             contextPack: requireContextPack(input),
             sessionID: input.sessionID,
             resumeSessionID: input.resumeSessionID,
             promptOverride: input.promptOverride,
+            reasoningEffort: input.reasoningEffort,
             onSessionStarted: (sessionID) =>
               queue.push({ kind: 'session_started', sessionID }),
             onVisibleText: (text) => {
@@ -335,9 +551,10 @@ export class LocalChildProcessHarness implements Harness {
   private async *runCodexTurn(
     input: HarnessTurnInput,
     signal?: AbortSignal,
+    client: CodexClientLike = this.codex(),
+    endpointKey = 'default',
   ): AsyncIterable<HarnessTurnEvent> {
     const queue = new EventQueue<HarnessTurnEvent>()
-    const client = this.codex()
     const clientUserMessageID = `mu-${uuid()}`
     let pending: Promise<CodexTurnResult>
 
@@ -347,9 +564,10 @@ export class LocalChildProcessHarness implements Harness {
         task: requireTask(input),
         prompt:
           input.promptOverride ?? renderedContextPackMarkdown(requireContextPack(input)),
+        reasoningEffort: input.reasoningEffort,
         clientUserMessageID,
         onTurnStarted: (threadID, turnID) => {
-          this.activeCodex = { threadID, turnID }
+          this.activeCodex.set(endpointKey, { threadID, turnID })
           queue.push({ kind: 'session_started', sessionID: threadID })
         },
         onVisibleText: (text) => queue.push({ kind: 'visible_text', text }),
@@ -359,17 +577,18 @@ export class LocalChildProcessHarness implements Harness {
         task: requireTask(input),
         contextPack: requireContextPack(input),
         promptOverride: input.promptOverride,
+        reasoningEffort: input.reasoningEffort,
         clientUserMessageID,
         onThreadStarted: (threadID) => queue.push({ kind: 'session_started', sessionID: threadID }),
         onTurnStarted: (threadID, turnID) => {
-          this.activeCodex = { threadID, turnID }
+          this.activeCodex.set(endpointKey, { threadID, turnID })
         },
         onVisibleText: (text) => queue.push({ kind: 'visible_text', text }),
       })
     }
 
     const onAbort = () => {
-      const active = this.activeCodex
+      const active = this.activeCodex.get(endpointKey)
       if (active !== undefined) {
         void client.interrupt(active.threadID, active.turnID).catch(() => undefined)
       }
@@ -384,6 +603,7 @@ export class LocalChildProcessHarness implements Harness {
       failure = error instanceof Error ? error.message : String(error)
     } finally {
       signal?.removeEventListener('abort', onAbort)
+      this.activeCodex.delete(endpointKey)
     }
 
     // Flush any events the callbacks pushed before the turn settled.

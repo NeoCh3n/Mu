@@ -15,9 +15,6 @@ enum AppSection: String, CaseIterable, Identifiable {
     case overview
     case agents
     case tasks
-    case handoffs
-    case runtimes
-    case ledger
 
     var id: String { rawValue }
 
@@ -26,9 +23,6 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .overview: "Overview"
         case .agents: "Agents"
         case .tasks: "Projects"
-        case .handoffs: "Handoffs"
-        case .runtimes: "Runtimes"
-        case .ledger: "Ledger"
         }
     }
 
@@ -37,9 +31,6 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .overview: "square.grid.2x2"
         case .agents: "person.2.crop.square.stack"
         case .tasks: "checklist"
-        case .handoffs: "arrow.left.arrow.right"
-        case .runtimes: "point.3.connected.trianglepath.dotted"
-        case .ledger: "clock.arrow.trianglehead.counterclockwise.rotate.90"
         }
     }
 }
@@ -209,6 +200,13 @@ final class AppStore: ObservableObject {
         do {
             self.service = try service ?? ControlPlaneService()
             reload()
+            if let service = self.service {
+                // Keep Codex app-server startup off the UI thread and out of
+                // the first Project routing path.
+                DispatchQueue.global(qos: .utility).async {
+                    service.warmCodexEndpoints()
+                }
+            }
             Task { [weak self] in
                 await self?.verifyOpenWorkerAndRestoreObservers()
             }
@@ -218,13 +216,17 @@ final class AppStore: ObservableObject {
     }
 
     private func verifyOpenWorkerAndRestoreObservers() async {
-        guard let service else { return }
-        if endpointSnapshots.contains(where: {
+        guard service != nil else { return }
+        // OpenWorker is an optional attached desktop surface. Do not probe a
+        // missing sidecar on every launch: that made startup noisy and
+        // appended a new failure event each time the app opened. The Runtime
+        // registry's explicit Probe action remains the authority for verifying
+        // a newly started sidecar; only restore observers for an endpoint that
+        // was already verified active.
+        guard endpoints.contains(where: {
             $0.id == ControlPlaneService.openWorkerEndpointID
-        }) {
-            _ = try? await service.probeOpenWorkerEndpoint()
-            reload()
-        }
+                && $0.status == .active
+        }) else { return }
         await restoreOpenWorkerObservers()
     }
 
@@ -404,6 +406,42 @@ final class AppStore: ObservableObject {
     func agent(id: UUID?) -> AgentIdentity? {
         guard let id else { return nil }
         return agents.first { $0.id == id }
+    }
+
+    /// The registry can contain legacy/test-created placeholder identities
+    /// that are byte-for-byte duplicates of one another. Keep the primary
+    /// Agent surface focused on real identities while retaining every record
+    /// in the store and exposing the hidden set from the UI.
+    var visibleAgentIdentities: [AgentIdentity] {
+        agents.filter { !isSyntheticPlaceholderAgent($0) }
+    }
+
+    var hiddenAgentIdentities: [AgentIdentity] {
+        agents.filter(isSyntheticPlaceholderAgent)
+    }
+
+    var selectableAgentIdentities: [AgentIdentity] {
+        visibleAgentIdentities.isEmpty ? agents : visibleAgentIdentities
+    }
+
+    private func isSyntheticPlaceholderAgent(_ agent: AgentIdentity) -> Bool {
+        guard agent.preferredEndpointID == nil,
+              agent.capabilityTags.isEmpty,
+              agent.shortName.caseInsensitiveCompare(agent.displayName)
+                  == .orderedSame else {
+            return false
+        }
+        let key = agent.displayName.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).lowercased()
+        let knownSummaries: [String: String] = [
+            "builder": "Implements task work in the workspace.",
+            "reviewer": "Reviews work and approves changes.",
+            "researcher": "Discovers and verifies context facts.",
+            "orchestrator": "Plans and routes tasks across agents."
+        ]
+        return knownSummaries[key]?.caseInsensitiveCompare(agent.summary)
+            == .orderedSame
     }
 
     func activeTasks(for agentID: UUID) -> [TaskRecord] {
@@ -771,69 +809,96 @@ final class AppStore: ObservableObject {
 
     func reload() {
         guard let service else { return }
+        var reloadStage = "tasks"
         do {
             let nextTasks = try service.store.fetchTasks()
+            reloadStage = "project preferences"
             let nextProjectPreferences =
                 try service.store.fetchProjectPreferences()
+            reloadStage = "projects"
             let nextProjectRecords =
                 try service.store.fetchProjects()
+            reloadStage = "principals"
             let nextPrincipals =
                 try service.store.fetchPrincipals()
+            reloadStage = "project actors"
             let nextProjectActors =
                 try service.store.fetchProjectActors()
+            reloadStage = "project memberships"
             let nextProjectMemberships =
                 try service.store.fetchProjectMemberships()
+            reloadStage = "delegations"
             let nextDelegations =
                 try service.store.fetchDelegations()
+            reloadStage = "project workspaces"
             let nextProjectWorkspaces =
                 try service.store.fetchProjectWorkspaces()
+            reloadStage = "task/project links"
             let nextTaskProjectLinks =
                 try service.store.fetchTaskProjectLinks()
+            reloadStage = "task leases"
             let nextTaskLeases =
                 try service.store.fetchTaskLeases()
+            reloadStage = "project artifacts"
             let nextProjectArtifacts =
                 try service.store.fetchProjectArtifacts()
+            reloadStage = "project reviews"
             let nextProjectReviews =
                 try service.store.fetchProjectReviews()
+            reloadStage = "project approvals"
             let nextProjectApprovals =
                 try service.store.fetchProjectApprovals()
+            reloadStage = "runtime adapter registrations"
             let nextRuntimeAdapterRegistrations =
                 try service.store
                 .fetchRuntimeAdapterRegistrations()
+            reloadStage = "agents"
             let nextAgents = try service.store.fetchAgents()
+            reloadStage = "chat entries"
             let nextChatEntries = try service.store.fetchChatEntries()
+            reloadStage = "runs"
             let nextRuns = try service.store.fetchRuns()
+            reloadStage = "runtime session bindings"
             let nextRuntimeSessionBindings =
                 try service.store.fetchRuntimeSessionBindings()
+            reloadStage = "runtime interactions"
             let nextRuntimeInteractions =
                 try service.store.fetchRuntimeInteractions()
+            reloadStage = "runtime artifacts"
             let nextRuntimeArtifacts =
                 try service.store.fetchRuntimeArtifacts()
+            reloadStage = "imported conversations"
             let nextImportedConversations =
                 try service.store.fetchImportedConversations()
+            reloadStage = "task context sources"
             let nextTaskContextSources = try nextTasks.flatMap {
                 try service.store.fetchTaskContextSources(taskID: $0.id)
             }
+            reloadStage = "context snapshots"
             let nextContextSnapshots =
                 try service.store.fetchContextSnapshots()
+            reloadStage = "context sources"
             let nextKernelContextSources =
                 try nextProjectRecords.flatMap {
                     try service.store.fetchContextSources(
                         projectID: $0.id
                     )
                 }
+            reloadStage = "context records"
             let nextKernelContextRecords =
                 try nextProjectRecords.flatMap {
                     try service.store.fetchContextRecords(
                         projectID: $0.id
                     )
                 }
+            reloadStage = "context conflicts"
             let nextKernelContextConflicts =
                 try nextProjectRecords.flatMap {
                     try service.store.fetchContextConflicts(
                         projectID: $0.id
                     )
                 }
+            reloadStage = "context packs"
             let nextKernelContextPacks =
                 try nextProjectRecords.flatMap {
                     try service.store.fetchProjectContextPacks(
@@ -845,13 +910,19 @@ final class AppStore: ObservableObject {
             let nextImportedMessagesByConversation =
                 importedMessagesByConversation
                 .filter { importedConversationIDs.contains($0.key) }
+            reloadStage = "checkpoints"
             let nextCheckpoints = try service.store.fetchCheckpoints()
+            reloadStage = "handoffs"
             let nextHandoffs = try service.store.fetchHandoffs()
+            reloadStage = "endpoint snapshots"
             let nextEndpointSnapshots = try service.store.fetchEndpoints()
+            reloadStage = "registered endpoints"
             let nextEndpoints =
                 try service.store.fetchRegisteredEndpoints()
+            reloadStage = "registry tombstones"
             let nextRegistryTombstones =
                 try service.store.fetchRegistryTombstones()
+            reloadStage = "ledger events"
             let nextEvents = try service.store.fetchEvents()
 
             replaceIfChanged(&tasks, with: nextTasks)
@@ -980,7 +1051,7 @@ final class AppStore: ObservableObject {
                 selectedTaskID = visibleTasks.first?.id
             }
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = "\(error.localizedDescription) (while loading \(reloadStage))"
         }
     }
 
@@ -1139,12 +1210,62 @@ final class AppStore: ObservableObject {
     }
 
     func openNewTask(projectPath: String) {
-        preselectedAgentID = nil
-        pendingTaskProjectPath = standardizedProjectPath(projectPath)
-        collapsedProjectPaths.remove(
-            standardizedProjectPath(projectPath)
+        let path = standardizedProjectPath(projectPath)
+        guard service != nil else {
+            pendingTaskProjectPath = path
+            isCreatingTask = true
+            return
+        }
+
+        // A Project-row plus is an invitation to start working, not another
+        // metadata form. Create a lightweight Task shell from the Project's
+        // existing endpoint/Agent choice and open Workspace Chat immediately.
+        // The first message replaces this placeholder title with a local
+        // summary, so the user never has to name the Task up front.
+        guard let endpoint = quickTaskEndpoint(for: path) else {
+            pendingTaskProjectPath = path
+            isCreatingTask = true
+            return
+        }
+        let projectName = projects.first {
+            standardizedProjectPath($0.path) == path
+        }?.name ?? URL(fileURLWithPath: path).lastPathComponent
+        let existingTask = projects.first {
+            standardizedProjectPath($0.path) == path
+        }?.tasks.first
+        let agentID = existingTask?.assignedAgentIdentityID
+            ?? visibleAgentIdentities.first(where: {
+                $0.preferredEndpointID == endpoint.id
+            })?.id
+            ?? selectableAgentIdentities.first?.id
+        let draft = CreateTaskDraft(
+            title: "New task",
+            objective: "Start working in \(projectName).",
+            repositoryPath: path,
+            sourceEndpointID: endpoint.id,
+            agentIdentityID: agentID
         )
-        isCreatingTask = true
+        collapsedProjectPaths.remove(path)
+        createTask(from: draft)
+        transientMessage =
+            "Workspace ready. Send the first message and Mu will summarize the Task title."
+    }
+
+    private func quickTaskEndpoint(for projectPath: String) -> RuntimeEndpoint? {
+        let projectTask = projects.first {
+            standardizedProjectPath($0.path) == projectPath
+        }?.tasks.first
+        let preferredIDs = [
+            projectTask?.currentEndpointID,
+            projectTask?.assignedAgentIdentityID.flatMap {
+                agent(id: $0)?.preferredEndpointID
+            }
+        ].compactMap { $0 }
+        let candidates = preferredIDs.compactMap { id in
+            initialTaskEndpoints.first { $0.id == id }
+        } + initialTaskEndpoints
+        var seen = Set<UUID>()
+        return candidates.first { seen.insert($0.id).inserted }
     }
 
     private func standardizedProjectPath(_ path: String) -> String {
@@ -1153,6 +1274,7 @@ final class AppStore: ObservableObject {
 
     func sendChat(taskID: UUID, text: String) {
         guard let service else { return }
+        autoSummarizeTaskTitle(taskID: taskID, firstMessage: text)
         do {
             let prepared = try service.prepareWorkspaceMessage(
                 taskID: taskID,
@@ -1160,7 +1282,7 @@ final class AppStore: ObservableObject {
             )
             reload()
             guard let route = prepared.route else {
-                transientMessage = "Local workspace note saved."
+                transientMessage = "Message saved automatically."
                 return
             }
             let runtimeTypeID =
@@ -1191,6 +1313,66 @@ final class AppStore: ObservableObject {
                 )
                 refreshOpenWorkerSessions()
             }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func autoSummarizeTaskTitle(
+        taskID: UUID,
+        firstMessage: String
+    ) {
+        guard let service,
+              var task = try? service.store.fetchTask(id: taskID),
+              ["new task", "untitled task", "new workspace task"]
+                .contains(task.title.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                ).lowercased()) else {
+            return
+        }
+        var words = firstMessage
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: { $0.isWhitespace })
+        while let first = words.first, first.hasPrefix("@") {
+            words.removeFirst()
+        }
+        if words.first?.lowercased() == "code" {
+            words.removeFirst()
+        }
+        let message = words.joined(separator: " ")
+        guard let firstSentence = message.split(
+            whereSeparator: { ".!?\n".contains($0) }
+        ).first else {
+            return
+        }
+        let candidate = String(firstSentence)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidate.isEmpty else { return }
+        let title = candidate.count > 72
+            ? String(candidate.prefix(71)) + "…"
+            : candidate
+        task.title = title
+        task.updatedAt = Date()
+        do {
+            try service.store.withTransaction {
+                try service.store.upsertTask(task)
+                try service.store.appendEvent(
+                    LedgerEvent(
+                        projectID: task.projectID,
+                        actorID: task.assignedActorID,
+                        workspaceID: task.workspaceID,
+                        taskID: task.id,
+                        runID: task.currentRunID,
+                        type: "task.auto_titled",
+                        summary: "Auto-titled Task “\(title)”.",
+                        payload: [
+                            "source": "first_workspace_message",
+                            "message_prefix": String(firstMessage.prefix(120))
+                        ]
+                    )
+                )
+            }
+            reload()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -1336,7 +1518,17 @@ final class AppStore: ObservableObject {
             reload()
         } catch {
             pendingRegistryDeletion = nil
-            errorMessage = error.localizedDescription
+            if case .agent(let agent) = deletion,
+               case MuError.recordNotFound = error {
+                // A stale card can survive while another process (or an
+                // earlier Mu build) has already removed the identity. Refresh
+                // the registry instead of surfacing a misleading hard error.
+                reload()
+                transientMessage =
+                    "Agent “\(agent.displayName)” was already removed; the registry was refreshed."
+            } else {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -1372,7 +1564,8 @@ final class AppStore: ObservableObject {
             )
             checkpointForHandoff = nil
             reload()
-            section = .handoffs
+            section = .tasks
+            selectTask(id: checkpoint.taskID)
             transientMessage = "Handoff proposed. Receiver acceptance is required."
         } catch {
             errorMessage = error.localizedDescription

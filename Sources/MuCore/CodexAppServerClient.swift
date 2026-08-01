@@ -8,6 +8,9 @@ public final class CodexAppServerClient {
     private let outputPipe = Pipe()
     private let errorPipe = Pipe()
     private let condition = NSCondition()
+    // Warm-up and the first turn may arrive concurrently. Serialize only the
+    // lifecycle transition so both callers share one app-server process.
+    private let lifecycleLock = NSLock()
     private let parsingQueue = DispatchQueue(label: "com.mu.codex-app-server.parser")
     private let turnReadFallbackInterval: TimeInterval = 2
     private let turnReadFallbackTimeout: TimeInterval = 2
@@ -47,6 +50,8 @@ public final class CodexAppServerClient {
     }
 
     public func start() throws -> [String: Any] {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
         guard !process.isRunning else {
             return initializedResult ?? [:]
         }
@@ -59,6 +64,8 @@ public final class CodexAppServerClient {
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
         process.standardError = errorPipe
+        processFailure = nil
+        initializedResult = nil
 
         outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
@@ -84,26 +91,36 @@ public final class CodexAppServerClient {
             throw MuError.commandFailed("Could not launch Codex App Server: \(error.localizedDescription)")
         }
 
-        let initialize = try request(
-            method: "initialize",
-            params: [
-                "clientInfo": [
-                    "name": "mu",
-                    "title": "Mu Runtime Control Plane",
-                    "version": "0.4.0"
+        do {
+            let initialize = try request(
+                method: "initialize",
+                params: [
+                    "clientInfo": [
+                        "name": "mu",
+                        "title": "Mu Runtime Control Plane",
+                        "version": "0.4.0"
+                    ],
+                    "capabilities": [
+                        "experimentalApi": true,
+                        "requestAttestation": false,
+                        "mcpServerOpenaiFormElicitation": false,
+                        "optOutNotificationMethods": []
+                    ]
                 ],
-                "capabilities": [
-                    "experimentalApi": true,
-                    "requestAttestation": false,
-                    "mcpServerOpenaiFormElicitation": false,
-                    "optOutNotificationMethods": []
-                ]
-            ],
-            timeout: 15
-        )
-        initializedResult = initialize
-        try notify(method: "initialized")
-        return initialize
+                timeout: 15
+            )
+            initializedResult = initialize
+            try notify(method: "initialized")
+            return initialize
+        } catch {
+            stopProcessUnlocked()
+            throw error
+        }
+    }
+
+    /// Starts the long-lived app-server without creating a Codex thread.
+    public func warm() throws {
+        _ = try start()
     }
 
     public func probe() throws -> CodexProbeResult {
@@ -602,6 +619,12 @@ public final class CodexAppServerClient {
     }
 
     public func stop() {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        stopProcessUnlocked()
+    }
+
+    private func stopProcessUnlocked() {
         outputPipe.fileHandleForReading.readabilityHandler = nil
         errorPipe.fileHandleForReading.readabilityHandler = nil
         if process.isRunning {
@@ -609,6 +632,7 @@ public final class CodexAppServerClient {
             process.waitUntilExit()
         }
         try? inputPipe.fileHandleForWriting.close()
+        initializedResult = nil
     }
 
     private func request(

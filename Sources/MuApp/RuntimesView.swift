@@ -3,14 +3,79 @@ import SwiftUI
 
 struct RuntimesView: View {
     @EnvironmentObject private var store: AppStore
+    var embedded = false
+    @State private var showingOtherDiscovered = false
+
+    private var primaryEndpoints: [RuntimeEndpoint] {
+        let useful = store.endpoints.filter { endpoint in
+            endpoint.status != .discovered
+                || endpoint.instanceIdentity != nil
+                || endpoint.nativeConfiguration != nil
+        }
+        return deduplicatedEndpoints(useful)
+    }
+
+    private var otherDiscoveredEndpoints: [RuntimeEndpoint] {
+        let primaryIDs = Set(primaryEndpoints.map(\.id))
+        return store.endpoints
+            .filter { !primaryIDs.contains($0.id) }
+            .sorted { $0.lastProbedAt > $1.lastProbedAt }
+    }
+
+    private func deduplicatedEndpoints(
+        _ endpoints: [RuntimeEndpoint]
+    ) -> [RuntimeEndpoint] {
+        var grouped: [String: [RuntimeEndpoint]] = [:]
+        for endpoint in endpoints {
+            grouped[endpointDisplayKey(endpoint), default: []].append(endpoint)
+        }
+        return grouped.values.compactMap { candidates in
+            candidates.sorted { lhs, rhs in
+                if lhs.status == .active, rhs.status != .active { return true }
+                if rhs.status == .active, lhs.status != .active { return false }
+                return lhs.lastProbedAt > rhs.lastProbedAt
+            }.first
+        }
+        .sorted { lhs, rhs in
+            lhs.muInstanceDisplayName.localizedCaseInsensitiveCompare(
+                rhs.muInstanceDisplayName
+            ) == .orderedAscending
+        }
+    }
+
+    private func endpointDisplayKey(_ endpoint: RuntimeEndpoint) -> String {
+        let identity = endpoint.resolvedInstanceIdentity
+        if endpoint.instanceIdentity != nil {
+            return "identity|\(identity.provider.rawValue)|\(identity.stableInstanceKey)"
+        }
+        if let executable = endpoint.nativeConfiguration?["executable"] {
+            return "executable|\(endpoint.runtimeTypeID)|\(executable)"
+        }
+        // Discovered records without identity evidence are not separate
+        // terminals. Collapse exact display/type copies into one useful card;
+        // the originals remain available in Other discovered.
+        return "unidentified|\(endpoint.runtimeTypeID)|\(endpoint.displayName)"
+    }
 
     var body: some View {
-        ScrollView {
+        if embedded {
+            registryContent
+        } else {
+            ScrollView {
+                registryContent
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var registryContent: some View {
             VStack(alignment: .leading, spacing: 24) {
                 HStack(alignment: .bottom) {
                     SectionHeader(
                         title: "Runtime registry",
-                        subtitle: "Scheduling uses capabilities and policy—not vendor names."
+                        subtitle:
+                            "\(primaryEndpoints.count) useful endpoints · "
+                                + "\(otherDiscoveredEndpoints.count) other discoveries"
                     )
                     Spacer()
                     Button {
@@ -30,15 +95,51 @@ struct RuntimesView: View {
                             message: "Register a definition; it remains Offline until a compatible adapter probe succeeds."
                         )
                     }
+                } else if primaryEndpoints.isEmpty {
+                    Panel {
+                        EmptyState(
+                            symbol: "line.3.horizontal.decrease.circle",
+                            title: "No verified runtimes",
+                            message: "Unverified discoveries are kept below until a useful adapter probe succeeds."
+                        )
+                    }
                 } else {
                     LazyVGrid(
                         columns: [GridItem(.adaptive(minimum: 360), spacing: 16)],
                         spacing: 16
                     ) {
-                        ForEach(store.endpoints) { endpoint in
+                        ForEach(primaryEndpoints) { endpoint in
                             RuntimeCard(endpoint: endpoint)
                         }
                     }
+                }
+
+                if !otherDiscoveredEndpoints.isEmpty {
+                    DisclosureGroup(
+                        isExpanded: $showingOtherDiscovered
+                    ) {
+                        LazyVGrid(
+                            columns: [GridItem(.adaptive(minimum: 360), spacing: 16)],
+                            spacing: 16
+                        ) {
+                            ForEach(otherDiscoveredEndpoints) { endpoint in
+                                RuntimeCard(endpoint: endpoint)
+                            }
+                        }
+                        .padding(.top, 10)
+                    } label: {
+                        HStack(spacing: 8) {
+                            Label(
+                                "Other discovered runtimes",
+                                systemImage: "archivebox"
+                            )
+                            Text("\(otherDiscoveredEndpoints.count)")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .font(.subheadline.weight(.semibold))
+                    }
+                    .tint(.secondary)
                 }
 
                 Panel(title: "Capability contract", subtitle: "First-slice scheduling boundary") {
@@ -64,8 +165,7 @@ struct RuntimesView: View {
                     }
                 }
             }
-            .padding(28)
-        }
+            .padding(embedded ? 0 : 28)
     }
 
     private func contractRow(

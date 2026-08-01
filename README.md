@@ -106,16 +106,20 @@ migration phases are implemented and tested:
    Project Kernel, Context Kernel, Runtime Gateway manifests
 2. **Persistence**: SQLite store (Swift-compatible `encodeMuJSON`), CAS
    artifact store, Git probe, domain record APIs
-3. **Runtime clients**: Claude Code `stream-json` CLI, Codex App Server
-   (stdio JSON-RPC), OpenWorker HTTP client
+3. **Runtime clients**: Claude Code `stream-json` CLI and Codex App Server
+   (stdio JSON-RPC); OpenWorker remains a Swift/macOS compatibility runtime,
+   not part of the TypeScript P0 control plane
 4. **Harness abstraction**: `Harness` interface with `LocalChildProcessHarness`
    and `QMHTTPHarness` (HMAC source auth, `/v1/turns`, SSE session states)
 5. **Control plane**: `ControlPlaneService` — tasks, fencing leases, Context
    Packs with `contentSHA256`, turn dispatch, approvals, reviews, handoffs, ledger
 6. **Server + API**: Fastify `buildApp(config)` with projects/agents/tasks/
    turns/context/approvals/handoffs/ledger routes and an SSE event stream
-7. **Web UI**: React + Vite + Tailwind — sidebar, task workspace with live chat,
-   runs, artifacts, handoffs, ledger
+7. **Web UI**: React + Vite + Tailwind — expandable Projects tree, fixed-height
+   Agent cards with endpoint/terminal identity, endpoint-scoped @Codex/@Claude
+   routing, streaming Markdown chat, selectable Context Pack records, history
+   discovery/import progress, runs/artifacts/handoffs/ledger, and per-turn
+   automatic reasoning-effort routing (`medium`/`high`/`ultra`)
 8. **Experimental QM Bridge** (not verified against upstream QM): Mu
    ContextPack → QM TurnRequest mapping and a QM HTTP client tested only
    against Mu's mock server — treated as experimental until real contract
@@ -125,7 +129,7 @@ migration phases are implemented and tested:
 ```sh
 cd mu-ts
 pnpm install
-pnpm -r test        # 195 tests
+pnpm -r test        # 189 tests
 pnpm -r typecheck
 pnpm --filter @mu/ui build       # build the web UI once
 pnpm --filter @mu/server start   # one process = the whole app

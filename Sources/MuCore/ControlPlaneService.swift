@@ -117,6 +117,10 @@ public final class ControlPlaneService: @unchecked Sendable {
     let codexRuntimeLock = NSLock()
     var activeCodexClients:
         [UUID: CodexAppServerClient] = [:]
+    /// One long-lived app-server client per endpoint. Creating a new process
+    /// for every Task made first routing pay process launch + initialize time.
+    var cachedCodexClients:
+        [UUID: CodexAppServerClient] = [:]
     let claudeRuntimeLock = NSLock()
     var activeClaudeClients:
         [UUID: ClaudeCodeClient] = [:]
@@ -165,6 +169,50 @@ public final class ControlPlaneService: @unchecked Sendable {
         try bootstrapProjectKernel()
         try migrateLegacyImportedConversationsToContextSources()
         try refreshRuntimeAdapterRegistrations()
+    }
+
+    deinit {
+        let clients = codexRuntimeLock.withLock {
+            let values = Array(cachedCodexClients.values)
+            cachedCodexClients.removeAll()
+            activeCodexClients.removeAll()
+            return values
+        }
+        for client in clients {
+            client.stop()
+        }
+    }
+
+    /// Returns the endpoint-scoped Codex client, creating it without starting
+    /// a process. Callers can then warm it or submit a turn through the same
+    /// persistent app-server connection.
+    func codexClient(for endpoint: RuntimeEndpoint) throws -> CodexAppServerClient {
+        guard let path = endpoint.nativeConfiguration?["executable"] else {
+            throw MuError.commandFailed("Codex executable path is not registered.")
+        }
+        return codexRuntimeLock.withLock {
+            if let cached = cachedCodexClients[endpoint.id] {
+                return cached
+            }
+            let client = CodexAppServerClient(
+                executableURL: URL(fileURLWithPath: path)
+            )
+            cachedCodexClients[endpoint.id] = client
+            return client
+        }
+    }
+
+    /// Best-effort background warm-up. A first Task remains correct if the
+    /// runtime is unavailable, but normally reaches thread/start immediately.
+    public func warmCodexEndpoints() {
+        let endpoints = (try? store.fetchRegisteredEndpoints()) ?? []
+        for endpoint in endpoints where endpoint.runtimeTypeID == Self.codexRuntimeTypeID
+            && (endpoint.status == .active || endpoint.status == .discovered) {
+            guard let client = try? codexClient(for: endpoint) else { continue }
+            DispatchQueue.global(qos: .utility).async {
+                try? client.warm()
+            }
+        }
     }
 
     public func bootstrapEndpoints() throws {
@@ -947,12 +995,11 @@ public final class ControlPlaneService: @unchecked Sendable {
                 == Self.codexRuntimeTypeID else {
             throw MuError.recordNotFound("Codex App Server endpoint")
         }
-        guard let path = endpoint.nativeConfiguration?["executable"] else {
+        guard endpoint.nativeConfiguration?["executable"] != nil else {
             throw MuError.commandFailed("Codex executable path is not registered.")
         }
 
-        let client = CodexAppServerClient(executableURL: URL(fileURLWithPath: path))
-        defer { client.stop() }
+        let client = try codexClient(for: endpoint)
         do {
             let result = try client.probe()
             endpoint.runtimeVersion = Self.codexVersion(from: result.userAgent)
@@ -1293,7 +1340,7 @@ public final class ControlPlaneService: @unchecked Sendable {
               endpoint.capabilities.contains(.start) else {
             throw MuError.capabilityMissing("The live Codex Start capability is not active.")
         }
-        guard let path = endpoint.nativeConfiguration?["executable"] else {
+        guard endpoint.nativeConfiguration?["executable"] != nil else {
             throw MuError.commandFailed("Codex executable path is not registered.")
         }
         guard var task = try store.fetchTask(id: initialRun.taskID),
@@ -1411,7 +1458,7 @@ public final class ControlPlaneService: @unchecked Sendable {
             throw error
         }
 
-        let client = CodexAppServerClient(executableURL: URL(fileURLWithPath: path))
+        let client = try codexClient(for: endpoint)
         codexRuntimeLock.withLock {
             activeCodexClients[runID] = client
         }
@@ -1419,7 +1466,6 @@ public final class ControlPlaneService: @unchecked Sendable {
             _ = codexRuntimeLock.withLock {
                 activeCodexClients.removeValue(forKey: runID)
             }
-            client.stop()
         }
         let mirror = ClaudeCodeOutputMirror {
             [weak self] text, force in
@@ -1765,7 +1811,7 @@ public final class ControlPlaneService: @unchecked Sendable {
               endpoint.status == .active else {
             throw MuError.capabilityMissing("The live Codex endpoint is not active.")
         }
-        guard let path = endpoint.nativeConfiguration?["executable"] else {
+        guard endpoint.nativeConfiguration?["executable"] != nil else {
             throw MuError.commandFailed("Codex executable path is not registered.")
         }
         guard let task = try store.fetchTask(id: run.taskID) else {
@@ -1797,8 +1843,7 @@ public final class ControlPlaneService: @unchecked Sendable {
             )
         }
 
-        let client = CodexAppServerClient(executableURL: URL(fileURLWithPath: path))
-        defer { client.stop() }
+        let client = try codexClient(for: endpoint)
         do {
             let result = try client.runReadOnlyReplan(
                 checkpoint: checkpoint,

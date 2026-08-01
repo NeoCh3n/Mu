@@ -3,6 +3,7 @@ import SwiftUI
 
 struct AgentsView: View {
     @EnvironmentObject private var store: AppStore
+    @State private var showingOtherIdentities = false
 
     var body: some View {
         ScrollView {
@@ -50,10 +51,17 @@ struct AgentsView: View {
                         }
                         Spacer()
                         StatusPill(
-                            label: "\(store.agents.count) registered",
+                            label: "\(store.visibleAgentIdentities.count) shown",
                             color: MuPalette.mint,
                             symbol: "checkmark.seal"
                         )
+                        if !store.hiddenAgentIdentities.isEmpty {
+                            Text(
+                                "\(store.hiddenAgentIdentities.count) duplicate placeholders hidden"
+                            )
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        }
                     }
                 }
 
@@ -81,11 +89,60 @@ struct AgentsView: View {
                         ],
                         spacing: 16
                     ) {
-                        ForEach(store.agents) { agent in
+                        ForEach(store.visibleAgentIdentities) { agent in
                             AgentIdentityCard(agent: agent)
                         }
                     }
+
+                    if !store.hiddenAgentIdentities.isEmpty {
+                        DisclosureGroup(
+                            isExpanded: $showingOtherIdentities
+                        ) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(store.hiddenAgentIdentities) { agent in
+                                    HStack(spacing: 10) {
+                                        Image(systemName: "person.crop.circle.badge.questionmark")
+                                            .foregroundStyle(.secondary)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(agent.displayName)
+                                                .font(.subheadline.weight(.medium))
+                                            Text(agent.id.uuidString.lowercased())
+                                                .font(.caption2.monospaced())
+                                                .foregroundStyle(.tertiary)
+                                                .lineLimit(1)
+                                                .truncationMode(.middle)
+                                        }
+                                        Spacer()
+                                        Button {
+                                            store.requestDelete(agent)
+                                        } label: {
+                                            Image(systemName: "trash")
+                                        }
+                                        .buttonStyle(.plain)
+                                        .foregroundStyle(.secondary)
+                                        .help("Delete \(agent.displayName)")
+                                        .accessibilityLabel("Delete \(agent.displayName)")
+                                    }
+                                    .padding(.vertical, 5)
+                                }
+                            }
+                            .padding(.top, 8)
+                        } label: {
+                            Label(
+                                "Other identities · \(store.hiddenAgentIdentities.count)",
+                                systemImage: "archivebox"
+                            )
+                            .font(.subheadline.weight(.semibold))
+                        }
+                        .tint(.secondary)
+                        .padding(.top, 4)
+                    }
                 }
+
+                Divider()
+                    .padding(.vertical, 4)
+
+                RuntimesView(embedded: true)
             }
             .padding(26)
         }

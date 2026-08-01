@@ -55,6 +55,8 @@ export class CodexAppServerClient {
   private visibleTextObservers = new Map<string, (text: string) => void>()
   private processFailure?: string
   private initializedResult?: Record<string, unknown>
+  /** Deduplicates the first app-server launch when warm-up and a turn race. */
+  private startPromise?: Promise<Record<string, unknown>>
   private stopped = false
 
   constructor(options: { executableURL: string }) {
@@ -62,9 +64,26 @@ export class CodexAppServerClient {
   }
 
   async start(): Promise<Record<string, unknown>> {
-    if (this.process !== undefined && this.process.exitCode === null) {
-      return this.initializedResult ?? {}
+    if (this.process !== undefined && this.process.exitCode === null && this.initializedResult !== undefined) {
+      return this.initializedResult
     }
+    if (this.startPromise !== undefined) return this.startPromise
+
+    const pending = this.startInternal()
+    this.startPromise = pending
+    try {
+      return await pending
+    } finally {
+      if (this.startPromise === pending) this.startPromise = undefined
+    }
+  }
+
+  /** Starts the long-lived app-server without creating a Codex thread. */
+  async warm(): Promise<void> {
+    await this.start()
+  }
+
+  private async startInternal(): Promise<Record<string, unknown>> {
     if (!isExecutableFile(this.executableURL)) {
       throw MuError.commandFailed(`Codex executable is unavailable at ${this.executableURL}`)
     }
@@ -86,30 +105,36 @@ export class CodexAppServerClient {
     process.on('exit', (code) => {
       if (code !== 0 && this.stopped === false) {
         this.processFailure = `Codex App Server exited with status ${code}.`
+        this.initializedResult = undefined
         this.rejectAllPending(this.processFailure)
       }
     })
 
-    const initialize = await this.request(
-      'initialize',
-      {
-        clientInfo: {
-          name: 'mu',
-          title: 'Mu Runtime Control Plane',
-          version: '0.4.0',
+    try {
+      const initialize = await this.request(
+        'initialize',
+        {
+          clientInfo: {
+            name: 'mu',
+            title: 'Mu Runtime Control Plane',
+            version: '0.4.0',
+          },
+          capabilities: {
+            experimentalApi: true,
+            requestAttestation: false,
+            mcpServerOpenaiFormElicitation: false,
+            optOutNotificationMethods: [],
+          },
         },
-        capabilities: {
-          experimentalApi: true,
-          requestAttestation: false,
-          mcpServerOpenaiFormElicitation: false,
-          optOutNotificationMethods: [],
-        },
-      },
-      15_000,
-    )
-    this.initializedResult = initialize
-    await this.notify('initialized')
-    return initialize
+        15_000,
+      )
+      this.initializedResult = initialize
+      await this.notify('initialized')
+      return initialize
+    } catch (error) {
+      this.stop()
+      throw error
+    }
   }
 
   async probe(): Promise<CodexProbeResult> {
@@ -198,6 +223,7 @@ export class CodexAppServerClient {
     agent?: { displayName: string; role: string; summary: string; capabilityTags: readonly string[] }
     contextPack?: ProjectContextPackRecord
     promptOverride?: string
+    reasoningEffort?: string
     clientUserMessageID: string
     timeoutMs?: number
     onThreadStarted?: (threadID: string) => void
@@ -218,6 +244,7 @@ export class CodexAppServerClient {
       onThreadStarted: params.onThreadStarted,
       onTurnStarted: params.onTurnStarted,
       onVisibleText: params.onVisibleText,
+      reasoningEffort: params.reasoningEffort,
     })
   }
 
@@ -226,6 +253,7 @@ export class CodexAppServerClient {
     task: TaskRecord
     prompt: string
     clientUserMessageID: string
+    reasoningEffort?: string
     timeoutMs?: number
     onTurnStarted?: (threadID: string, turnID: string) => void
     onVisibleText?: (text: string) => void
@@ -265,6 +293,7 @@ export class CodexAppServerClient {
         approvalPolicy: 'never',
         approvalsReviewer: 'user',
         sandboxPolicy: { type: 'readOnly', networkAccess: false },
+        ...(params.reasoningEffort === undefined ? {} : { effort: params.reasoningEffort }),
         clientUserMessageId: params.clientUserMessageID,
       },
       30_000,
@@ -291,6 +320,7 @@ export class CodexAppServerClient {
 
   stop(): void {
     this.stopped = true
+    this.initializedResult = undefined
     if (this.process !== undefined && this.process.exitCode === null) {
       this.process.kill()
     }
@@ -314,6 +344,7 @@ export class CodexAppServerClient {
     onThreadStarted?: (threadID: string) => void
     onTurnStarted?: (threadID: string, turnID: string) => void
     onVisibleText?: (text: string) => void
+    reasoningEffort?: string
   }): Promise<CodexTurnResult> {
     await this.start()
     const threadResponse = await this.request(
@@ -337,15 +368,13 @@ export class CodexAppServerClient {
     }
     params.onThreadStarted?.(threadID)
     if (params.threadName !== undefined && params.threadName.trim() !== '') {
-      try {
-        await this.request(
-          'thread/name/set',
-          { threadId: threadID, name: params.threadName.trim() },
-          10_000,
-        )
-      } catch {
-        // Name setting is best-effort.
-      }
+      // Naming is metadata only. Do not put an extra round trip in front of
+      // turn/start; the app-server can process both requests concurrently.
+      void this.request(
+        'thread/name/set',
+        { threadId: threadID, name: params.threadName.trim() },
+        10_000,
+      ).catch(() => undefined)
     }
 
     const turnParams: JsonObject = {
@@ -356,6 +385,7 @@ export class CodexAppServerClient {
       approvalPolicy: 'never',
       approvalsReviewer: 'user',
       sandboxPolicy: { type: 'readOnly', networkAccess: false },
+      ...(params.reasoningEffort === undefined ? {} : { effort: params.reasoningEffort }),
     }
     if (params.clientUserMessageID !== undefined) {
       turnParams['clientUserMessageId'] = params.clientUserMessageID

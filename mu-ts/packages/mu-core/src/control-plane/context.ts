@@ -183,6 +183,8 @@ export interface BuildContextPackParams {
   readonly constraints?: readonly string[]
   readonly relevantFilePaths?: readonly string[]
   readonly acceptedArtifactIDs?: readonly UUID[]
+  /** Optional explicit subset of accepted task context selected by the user. */
+  readonly includedContextRecordIDs?: readonly UUID[]
   readonly createdAt?: Date
 }
 
@@ -196,7 +198,15 @@ export function buildProjectContextPack(
   store: SQLiteStore,
   params: BuildContextPackParams,
 ): ProjectContextPackRecord {
-  const accepted = acceptedContextRecordsForTask(store, params.projectID, params.taskID)
+  // Without an explicit selection, preserve the original task-scoped default.
+  // When the UI supplies selected IDs, an accepted record from another Task in
+  // the same Project is intentionally eligible: this is the governed bridge
+  // for importing multiple Agent conversations into a new Task.
+  const accepted = params.includedContextRecordIDs === undefined
+    ? acceptedContextRecordsForTask(store, params.projectID, params.taskID)
+    : fetchContextRecords(store, params.projectID).filter(
+      (record) => record.status === 'accepted' && params.includedContextRecordIDs!.includes(record.id),
+    )
   const rendered = renderPackMarkdown(params.objective, accepted, params.constraints ?? [])
 
   const pack = createProjectContextPackRecord({

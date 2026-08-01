@@ -132,6 +132,10 @@ export function bootstrapLocalControlPlane(
     )
   }
 
+  // Keep the first user turn out of the cold-start path. This is best effort;
+  // an unavailable runtime is still surfaced by the normal probe/turn path.
+  void service.warmEndpoints()
+
   return {
     service,
     store,

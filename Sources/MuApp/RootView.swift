@@ -151,7 +151,7 @@ struct RootView: View {
                 .frame(width: 42, height: 42)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Mu")
+            Text("Mu")
                         .font(.headline)
                     Text("Runtime control plane")
                         .font(.caption)
@@ -165,8 +165,6 @@ struct RootView: View {
 
             List(AppSection.allCases) { section in
                 let isSelected = store.section == section
-                let badgeCount = section == .handoffs ? store.pendingHandoffs.count : 0
-
                 Button {
                     store.section = section
                 } label: {
@@ -176,22 +174,6 @@ struct RootView: View {
                         Text(section.title)
                             .fontWeight(isSelected ? .semibold : .regular)
                         Spacer(minLength: 8)
-                        if badgeCount > 0 {
-                            Text("\(badgeCount)")
-                                .font(.caption2.weight(.bold))
-                                .foregroundStyle(
-                                    isSelected ? Color.white : MuPalette.coral
-                                )
-                                .padding(.horizontal, 7)
-                                .frame(minHeight: 18)
-                                .background(
-                                    isSelected
-                                        ? MuPalette.coral
-                                        : MuPalette.coral.opacity(0.12),
-                                    in: Capsule()
-                                )
-                                .accessibilityHidden(true)
-                        }
                         if isSelected {
                             Image(systemName: "checkmark")
                                 .font(.caption.weight(.bold))
@@ -221,8 +203,7 @@ struct RootView: View {
                 .accessibilityLabel(section.title)
                 .accessibilityValue(
                     sidebarAccessibilityValue(
-                        isSelected: isSelected,
-                        badgeCount: badgeCount
+                        isSelected: isSelected
                     )
                 )
                 .accessibilityAddTraits(isSelected ? .isSelected : [])
@@ -244,6 +225,9 @@ struct RootView: View {
                 Text("No hosted relay · SQLite + CAS")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                Text("State saves continuously")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
             .padding(14)
         }
@@ -251,15 +235,11 @@ struct RootView: View {
     }
 
     private func sidebarAccessibilityValue(
-        isSelected: Bool,
-        badgeCount: Int
+        isSelected: Bool
     ) -> String {
         var parts: [String] = []
         if isSelected {
             parts.append("Selected")
-        }
-        if badgeCount > 0 {
-            parts.append("\(badgeCount) pending")
         }
         return parts.joined(separator: ", ")
     }
@@ -273,12 +253,6 @@ struct RootView: View {
             AgentsView()
         case .tasks:
             TasksWorkspaceView()
-        case .handoffs:
-            HandoffsView()
-        case .runtimes:
-            RuntimesView()
-        case .ledger:
-            LedgerView()
         }
     }
 }
@@ -296,6 +270,16 @@ struct DashboardView: View {
 
     private var activeProjects: [ProjectGroup] {
         projects.filter { $0.activeTaskCount > 0 }
+    }
+
+    private var participatingAgents: [AgentIdentity] {
+        let ids = Set(activeTasks.compactMap(\.assignedAgentIdentityID))
+        return store.visibleAgentIdentities.filter { ids.contains($0.id) }
+    }
+
+    private func agents(in project: ProjectGroup) -> [AgentIdentity] {
+        let ids = Set(project.tasks.compactMap(\.assignedAgentIdentityID))
+        return store.visibleAgentIdentities.filter { ids.contains($0.id) }
     }
 
     var body: some View {
@@ -328,32 +312,66 @@ struct DashboardView: View {
                         symbol: "bolt.fill"
                     )
                     MetricCard(
-                        title: "Handoff inbox",
-                        value: "\(store.pendingHandoffs.count)",
-                        detail: "Explicit acceptance",
+                        title: "Active Tasks",
+                        value: "\(activeTasks.count)",
+                        detail: "Across current Projects",
                         color: MuPalette.coral,
-                        symbol: "arrow.left.arrow.right"
+                        symbol: "bubble.left.and.bubble.right"
                     )
                     MetricCard(
-                        title: "Checkpoints",
-                        value: "\(store.checkpoints.count)",
-                        detail: "Immutable records",
+                        title: "Agents in work",
+                        value: "\(participatingAgents.count)",
+                        detail: "Assigned to active Tasks",
                         color: MuPalette.mint,
-                        symbol: "seal.fill"
+                        symbol: "person.2.fill"
                     )
                     MetricCard(
-                        title: "Ledger events",
-                        value: "\(store.events.count)",
-                        detail: "Append-only history",
+                        title: "Connected runtimes",
+                        value: "\(store.endpoints.filter { $0.status == .active }.count)",
+                        detail: "Ready to receive work",
                         color: .blue,
-                        symbol: "list.bullet.rectangle"
+                        symbol: "point.3.connected.trianglepath.dotted"
                     )
+                }
+
+                Panel(
+                    title: "Current Projects",
+                    subtitle: "What is in progress and which Agents are participating"
+                ) {
+                    if projects.isEmpty {
+                        compactEmpty(
+                            symbol: "folder",
+                            title: "No Projects yet",
+                            message: "Create a Project to give Agents a shared workspace."
+                        )
+                    } else {
+                        VStack(spacing: 0) {
+                            ForEach(projects.prefix(6)) { project in
+                                Button {
+                                    if let task = project.tasks.first(where: { !$0.status.isTerminal })
+                                        ?? project.tasks.first {
+                                        store.selectTask(task)
+                                    }
+                                    store.section = .tasks
+                                } label: {
+                                    DashboardProjectRow(
+                                        project: project,
+                                        agents: agents(in: project)
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                                if project.id != projects.prefix(6).last?.id {
+                                    Divider().padding(.leading, 42)
+                                }
+                            }
+                        }
+                    }
                 }
 
                 HStack(alignment: .top, spacing: 16) {
                     Panel(
                         title: "Active work",
-                        subtitle: "Tasks, ownership, runtime, and next Handoff state"
+                        subtitle: "Tasks, ownership, and runtime state"
                     ) {
                         if activeTasks.isEmpty {
                             compactEmpty(
@@ -381,20 +399,23 @@ struct DashboardView: View {
                     .frame(maxWidth: .infinity)
 
                     Panel(
-                        title: "Recent ledger",
-                        subtitle: "Canonical execution facts"
+                        title: "Agents in the room",
+                        subtitle: "Identities currently attached to active work"
                     ) {
-                        if store.events.isEmpty {
+                        if participatingAgents.isEmpty {
                             compactEmpty(
-                                symbol: "clock",
-                                title: "No events yet",
-                                message: "Control-plane activity will appear here."
+                                symbol: "person.2",
+                                title: "No active Agent assignments",
+                                message: "Agents will appear here when a Project Task starts."
                             )
                         } else {
                             VStack(spacing: 0) {
-                                ForEach(store.events.prefix(5)) { event in
-                                    EventCompactRow(event: event)
-                                    if event.id != store.events.prefix(5).last?.id {
+                                ForEach(participatingAgents) { agent in
+                                    DashboardAgentRow(
+                                        agent: agent,
+                                        taskCount: store.activeTasks(for: agent.id).count
+                                    )
+                                    if agent.id != participatingAgents.last?.id {
                                         Divider().padding(.leading, 32)
                                     }
                                 }
@@ -422,8 +443,8 @@ struct DashboardView: View {
                             .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button("View runtimes") {
-                            store.section = .runtimes
+                        Button("Manage agents & runtimes") {
+                            store.section = .agents
                         }
                     }
                 }
@@ -483,6 +504,74 @@ private struct DashboardTaskRow: View {
         }
         .contentShape(Rectangle())
         .padding(.vertical, 10)
+    }
+}
+
+private struct DashboardProjectRow: View {
+    let project: ProjectGroup
+    let agents: [AgentIdentity]
+
+    var body: some View {
+        HStack(spacing: 12) {
+            RoundedRectangle(cornerRadius: 9)
+                .fill(MuPalette.violet.opacity(0.12))
+                .frame(width: 32, height: 32)
+                .overlay {
+                    Image(systemName: "folder.fill")
+                        .foregroundStyle(MuPalette.violet)
+                }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(project.name)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                HStack(spacing: 7) {
+                    Text("\(project.activeTaskCount) active · \(project.taskCount) total")
+                    if !agents.isEmpty {
+                        Text("·")
+                        Text(agents.map(\.displayName).joined(separator: ", "))
+                            .lineLimit(1)
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .contentShape(Rectangle())
+        .padding(.vertical, 10)
+    }
+}
+
+private struct DashboardAgentRow: View {
+    let agent: AgentIdentity
+    let taskCount: Int
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(agent.shortName)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.white)
+                .frame(width: 30, height: 30)
+                .background(
+                    Color(muHex: agent.accentHex),
+                    in: RoundedRectangle(cornerRadius: 8)
+                )
+            VStack(alignment: .leading, spacing: 2) {
+                Text(agent.displayName)
+                    .font(.subheadline.weight(.semibold))
+                Text(agent.role.displayName)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text("\(taskCount) Task\(taskCount == 1 ? "" : "s")")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(MuPalette.violet)
+        }
+        .padding(.vertical, 9)
     }
 }
 

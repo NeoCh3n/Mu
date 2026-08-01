@@ -36,9 +36,8 @@ describe('Mu UI', () => {
     // the sidebar links explicitly.
     const links = document.querySelectorAll('nav a')
     const labels = Array.from(links).map((link) => link.textContent)
-    expect(labels).toEqual(
-      expect.arrayContaining(['Projects', 'Agents', 'Runtimes', 'Tasks', 'Handoffs', 'Ledger']),
-    )
+    expect(labels).toEqual(expect.arrayContaining(['Overview', 'Projects', 'Agents']))
+    expect(labels).not.toEqual(expect.arrayContaining(['Runtimes', 'Handoffs', 'Ledger']))
   })
 
   it('lists projects fetched from the API', async () => {
@@ -66,5 +65,25 @@ describe('Mu UI', () => {
       </MemoryRouter>,
     )
     expect(await screen.findByText(/No handoffs yet/)).toBeTruthy()
+  })
+
+  it('merges runtime endpoints into the Agents surface', async () => {
+    render(
+      <MemoryRouter initialEntries={['/agents']}>
+        <App />
+      </MemoryRouter>,
+    )
+    expect(await screen.findByText('Runtime endpoints')).toBeTruthy()
+    expect(await screen.findByText(/No useful runtime endpoints yet/)).toBeTruthy()
+  })
+
+  it('shows project and participating-agent summaries on Overview', async () => {
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>,
+    )
+    expect(await screen.findByText('Current Projects')).toBeTruthy()
+    expect(await screen.findByText('Agents in the room')).toBeTruthy()
   })
 })

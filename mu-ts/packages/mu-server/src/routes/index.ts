@@ -9,6 +9,7 @@ import { registerApprovalRoutes } from './approvals.ts'
 import { registerHandoffRoutes } from './handoffs.ts'
 import { registerLedgerRoutes } from './ledger.ts'
 import { registerEventsRoutes } from './events.ts'
+import { registerHistoryRoutes } from './history.ts'
 
 export interface RouteContext {
   readonly service: ControlPlaneService
@@ -25,4 +26,5 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   registerHandoffRoutes(app, ctx)
   registerLedgerRoutes(app, ctx)
   registerEventsRoutes(app, ctx)
+  registerHistoryRoutes(app, ctx)
 }

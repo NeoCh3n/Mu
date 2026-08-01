@@ -15,6 +15,7 @@ import {
   type RuntimeInteractionKind,
   type RuntimeInteractionState,
   type RuntimeSessionState,
+  type ReasoningEffort,
   type RunPurpose,
   type RunState,
   type TaskStatus,
@@ -407,6 +408,8 @@ export interface RunRecord {
   readonly nativeThreadID?: string
   readonly nativeTurnID?: string
   readonly nativeOutput?: string
+  /** Resolved model/reasoning budget selected for this turn. */
+  readonly reasoningEffort?: ReasoningEffort
   readonly agentIdentityID?: UUID
   readonly createdAt: Date
   readonly updatedAt: Date
@@ -429,6 +432,7 @@ export function createRunRecord(params: {
   nativeThreadID?: string
   nativeTurnID?: string
   nativeOutput?: string
+  reasoningEffort?: ReasoningEffort
   agentIdentityID?: UUID
   createdAt?: Date
   updatedAt?: Date
@@ -451,6 +455,7 @@ export function createRunRecord(params: {
     nativeThreadID: params.nativeThreadID,
     nativeTurnID: params.nativeTurnID,
     nativeOutput: params.nativeOutput,
+    reasoningEffort: params.reasoningEffort,
     agentIdentityID: params.agentIdentityID,
     createdAt: now,
     updatedAt: params.updatedAt ?? now,
@@ -756,4 +761,3 @@ export function createLedgerEvent(params: {
     occurredAt: params.occurredAt ?? new Date(),
   }
 }
-

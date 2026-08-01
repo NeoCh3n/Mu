@@ -10,8 +10,7 @@ extension ControlPlaneService {
             runtimeTypeID: Self.codexRuntimeTypeID,
             nativeAgentName: "Codex"
         )
-        guard let executable =
-            state.endpoint.nativeConfiguration?["executable"] else {
+        guard state.endpoint.nativeConfiguration?["executable"] != nil else {
             let error = MuError.commandFailed(
                 "Codex executable path is not registered."
             )
@@ -21,9 +20,7 @@ extension ControlPlaneService {
             )
             throw error
         }
-        let client = CodexAppServerClient(
-            executableURL: URL(fileURLWithPath: executable)
-        )
+        let client = try codexClient(for: state.endpoint)
         codexRuntimeLock.withLock {
             activeCodexClients[state.run.id] = client
         }
@@ -33,7 +30,6 @@ extension ControlPlaneService {
                     forKey: state.run.id
                 )
             }
-            client.stop()
         }
         let mirror = ClaudeCodeOutputMirror {
             [weak self] text, force in

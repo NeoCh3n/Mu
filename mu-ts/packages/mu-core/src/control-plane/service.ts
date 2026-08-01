@@ -10,7 +10,7 @@ import {
   stableConflictID,
 } from '../context-kernel/index.ts'
 import type { Harness, HarnessTurnEvent, HarnessTurnInput } from '../harness/types.ts'
-import type { AgentRuntimeInstanceIdentity } from '../types.ts'
+import { resolveReasoningEffort, type AgentRuntimeEndpointScope, type AgentRuntimeInstanceIdentity, type ReasoningEffort } from '../types.ts'
 import { toAgentHostAdapter } from '../host-adapter/harness-adapter.ts'
 import type { AgentHostAdapter, HostHistoryCandidate } from '../host-adapter/types.ts'
 import {
@@ -43,6 +43,7 @@ import {
   fetchHandoffs,
   fetchProjectApprovals,
   fetchProjects,
+  fetchProjectContextPack,
   fetchRun,
   fetchRuns,
   fetchRuntimeArtifacts,
@@ -147,6 +148,8 @@ export interface ControlPlaneService {
   // Projects
   createProject(params: { displayName: string; repositoryPath?: string; ownerPrincipalID: UUID }): ProjectRecord
   listProjects(): ProjectRecord[]
+  renameProject(projectID: UUID, displayName: string): ProjectRecord
+  removeProject(projectID: UUID): ProjectRecord
   // Agents
   createAgent(params: {
     displayName: string
@@ -186,6 +189,10 @@ export interface ControlPlaneService {
   runTaskTurn(params: {
     taskID: UUID
     endpointID?: UUID
+    /** Reuse an immutable pack created for another task in the same project/workspace. */
+    contextPackID?: UUID
+    contextRecordIDs?: readonly UUID[]
+    reasoningEffort?: ReasoningEffort
     text: string
     promptOverride?: string
     sessionID?: string
@@ -195,7 +202,7 @@ export interface ControlPlaneService {
   // Context
   importContextRecord(params: ImportContextRecordParams): ContextRecord
   reviewContextRecord(params: { recordID: UUID; decision: 'accepted' | 'rejected' | 'disputed'; actorID: UUID }): ContextRecord
-  listContextRecords(projectID: UUID): ContextRecord[]
+    listContextRecords(projectID: UUID): ContextRecord[]
   buildContextPack(params: {
     projectID: UUID
     taskID: UUID
@@ -204,6 +211,7 @@ export interface ControlPlaneService {
     endpointID: UUID
     actorID: UUID
     principalID: UUID
+    contextRecordIDs?: readonly UUID[]
   }): ProjectContextPackRecord
   resolveConflict(params: { conflictID: UUID; acceptedRecordIDs: readonly UUID[]; actorID: UUID; note?: string }): ContextConflictRecordLike
   // Approvals & reviews
@@ -236,7 +244,10 @@ export interface ControlPlaneService {
    * visibility; the query runs inside the same host process that ran the
    * turns). Returns [] when the host has no history surface.
    */
-  discoverHistory(workspacePath: string): Promise<HostHistoryCandidate[]>
+  discoverHistory(endpointID: UUID, workspacePath: string): Promise<HostHistoryCandidate[]>
+  hydrateHistory(endpointID: UUID, candidate: HostHistoryCandidate): Promise<HostHistoryCandidate>
+  /** Best-effort background warm-up for long-lived endpoint connections. */
+  warmEndpoints(): Promise<void>
   probeEndpoints(): Promise<ProbeOutcome[]>
   close(): void
 }
@@ -268,6 +279,26 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
     return next
   }
 
+  /** Holds the endpoint queue for the full host stream, not just preparation. */
+  function streamOnEndpoint<T>(
+    endpointID: UUID,
+    work: () => AsyncIterable<T>,
+  ): AsyncGenerator<T, void> {
+    const previous = endpointQueues.get(endpointID) ?? Promise.resolve()
+    let release!: () => void
+    const current = new Promise<void>((resolve) => { release = resolve })
+    endpointQueues.set(endpointID, current)
+    return (async function* () {
+      await previous
+      try {
+        for await (const item of work()) yield item
+      } finally {
+        if (endpointQueues.get(endpointID) === current) endpointQueues.delete(endpointID)
+        release()
+      }
+    })()
+  }
+
   function emit(event: ControlPlaneTurnEvent): void {
     onEvent?.(event)
   }
@@ -279,6 +310,20 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
       rawValue: endpoint.instanceIdentity?.provider.rawValue
         ?? endpoint.nativeConfiguration?.['provider']
         ?? 'claude_code',
+    }
+  }
+
+  function endpointScope(endpoint: RuntimeEndpoint): AgentRuntimeEndpointScope {
+    if (endpoint.instanceIdentity === undefined) {
+      throw MuError.invalidTransition(
+        `Endpoint ${endpoint.id} has no instance identity and cannot be used by a host.`,
+      )
+    }
+    return {
+      endpointID: endpoint.id,
+      runtimeTypeID: endpoint.runtimeTypeID,
+      displayName: endpoint.displayName,
+      instanceIdentity: endpoint.instanceIdentity,
     }
   }
 
@@ -308,6 +353,42 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
 
     listProjects() {
       return fetchProjects(store)
+    },
+
+    renameProject(projectID, displayName) {
+      const project = fetchProjects(store).find((candidate) => candidate.id === projectID)
+      if (project === undefined) {
+        throw MuError.recordNotFound(`Project ${projectID} was not found.`)
+      }
+      const normalized = displayName.trim()
+      if (normalized === '') {
+        throw MuError.invalidTransition('Project display name cannot be empty.')
+      }
+      const renamed = { ...project, displayName: normalized, updatedAt: now() }
+      upsertProject(store, renamed)
+      appendLedger(store, {
+        type: 'project.renamed',
+        summary: `Renamed project to "${normalized}".`,
+        projectID,
+        occurredAt: now(),
+      })
+      return renamed
+    },
+
+    removeProject(projectID) {
+      const project = fetchProjects(store).find((candidate) => candidate.id === projectID)
+      if (project === undefined) {
+        throw MuError.recordNotFound(`Project ${projectID} was not found.`)
+      }
+      const removed = { ...project, status: 'archived' as const, updatedAt: now() }
+      upsertProject(store, removed)
+      appendLedger(store, {
+        type: 'project.archived',
+        summary: `Archived project "${project.displayName}".`,
+        projectID,
+        occurredAt: now(),
+      })
+      return removed
     },
 
     // -----------------------------------------------------------------------
@@ -378,13 +459,7 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
             { operation: 'interrupt', support: host.capabilities.supportsInterrupt ? 'supported' : 'unsupported' },
             { operation: 'artifact.list', support: host.capabilities.supportsArtifacts ? 'supported' : 'unsupported' },
           ],
-          instanceIdentity: {
-            provider: providerFor(endpoint),
-            surfaceKind: endpoint.location === 'local' ? 'terminal_cli' : 'remote_service',
-            identityBasis: 'installation',
-            stableInstanceKey: `endpoint:${endpoint.id}`,
-            instanceLabel: endpoint.displayName,
-          },
+          instanceIdentity: endpoint.instanceIdentity!,
           notes: [],
         },
         probedAt: now(),
@@ -453,7 +528,7 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
     // -----------------------------------------------------------------------
 
     async *runTaskTurn(params) {
-      const task = fetchTask(store, params.taskID)
+      let task = fetchTask(store, params.taskID)
       if (task === undefined) {
         throw MuError.recordNotFound(`Task ${params.taskID} was not found.`)
       }
@@ -466,6 +541,22 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
       const projectID = task.projectID
       if (projectID === undefined) {
         throw MuError.invalidTransition(`Task ${task.id} has no project binding.`)
+      }
+
+      const autoTitle = summarizeFirstTaskMessage(params.text)
+      if (autoTitle !== undefined && isPlaceholderTaskTitle(task.title)) {
+        const titledAt = now()
+        task = { ...task, title: autoTitle, updatedAt: titledAt }
+        upsertTask(store, task)
+        appendLedger(store, {
+          type: 'task.auto_titled',
+          summary: `Auto-titled task "${autoTitle}".`,
+          projectID,
+          workspaceID: task.workspaceID,
+          taskID: task.id,
+          occurredAt: titledAt,
+          payload: { source: 'first_workspace_message' },
+        })
       }
 
       const agent = task.assignedAgentIdentityID === undefined
@@ -481,8 +572,20 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
       if (endpoint === undefined) {
         throw MuError.recordNotFound(`Endpoint ${endpointID} was not found.`)
       }
+      const scope = endpointScope(endpoint)
+      if (params.reasoningEffort !== undefined && !['auto', 'low', 'medium', 'high', 'ultra'].includes(params.reasoningEffort)) {
+        throw MuError.invalidTransition(`Unsupported reasoning effort '${String(params.reasoningEffort)}'.`)
+      }
+      const reasoningEffort = resolveReasoningEffort({
+        requested: params.reasoningEffort,
+        title: task.title,
+        objective: task.objective,
+        prompt: params.text,
+        constraintCount: task.constraints.length,
+      })
 
-      // Serialize per endpoint (local harness = one active turn).
+      // Serialize record preparation per endpoint; the host stream below also
+      // holds the same queue until the turn reaches a terminal event.
       const prepared = await serializeOnEndpoint(endpointID, async () => {
         const nowT = now()
 
@@ -518,20 +621,36 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
         })
         upsertRuntimeSessionBinding(store, binding)
 
-        const pack = buildProjectContextPack(store, {
-          projectID,
-          taskID: task.id,
-          workspaceID: task.workspaceID ?? projectID,
-          objective: task.objective,
-          endpointID,
-          bindingID: binding.id,
-          actorID: task.requestedByActorID ?? agent?.id ?? uuid(),
-          taskLeaseID: lease.id,
-          leaseFencingToken: lease.fencingToken,
-          constraints: task.constraints,
-          createdAt: nowT,
-        })
-        insertProjectContextPack(store, pack)
+        let pack: ProjectContextPackRecord
+        if (params.contextPackID !== undefined) {
+          const reused = fetchProjectContextPack(store, params.contextPackID)
+          if (reused === undefined) {
+            throw MuError.recordNotFound(`Context Pack ${params.contextPackID} was not found.`)
+          }
+          const targetWorkspaceID = task.workspaceID ?? projectID
+          if (reused.projectID !== projectID || reused.workspaceID !== targetWorkspaceID) {
+            throw MuError.invalidTransition(
+              'A Context Pack can only be delivered within the same project and workspace.',
+            )
+          }
+          pack = reused
+        } else {
+          pack = buildProjectContextPack(store, {
+            projectID,
+            taskID: task.id,
+            workspaceID: task.workspaceID ?? projectID,
+            objective: task.objective,
+            endpointID,
+            bindingID: binding.id,
+            actorID: task.requestedByActorID ?? agent?.id ?? uuid(),
+            taskLeaseID: lease.id,
+            leaseFencingToken: lease.fencingToken,
+            constraints: task.constraints,
+            includedContextRecordIDs: params.contextRecordIDs,
+            createdAt: nowT,
+          })
+          insertProjectContextPack(store, pack)
+        }
 
         const run = createRunRecord({
           taskID: task.id,
@@ -541,6 +660,7 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
           taskLeaseID: lease.id,
           contextPackID: pack.id,
           endpointID,
+          reasoningEffort,
           actorName: agent?.displayName ?? endpoint.displayName,
           purpose: 'execution',
           state: 'starting',
@@ -571,11 +691,14 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
         const userChat = createChatEntry({
           taskID: task.id,
           agentIdentityID: agent?.id,
+          targetAgentIdentityID: agent?.id,
+          targetEndpointID: endpointID,
           runID: run.id,
           runtimeSessionBindingID: binding.id,
           authorKind: 'user',
           authorName: 'User',
           text: params.text,
+          routedText: params.text,
           deliveryState: 'routing',
           createdAt: nowT,
         })
@@ -612,6 +735,7 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
         sessionID: params.sessionID,
         resumeSessionID: params.resumeSessionID,
         promptOverride: params.promptOverride,
+        reasoningEffort,
       }
       upsertRuntimeSessionBinding(store, { ...binding, state: 'working', updatedAt: now() })
       upsertRun(store, { ...run, state: 'active', updatedAt: now() })
@@ -620,7 +744,7 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
       let sessionID = ''
       let terminalEvent: HarnessTurnEvent | undefined
 
-      for await (const event of host.submit(input)) {
+      for await (const event of streamOnEndpoint(endpointID, () => host.submit(scope, input))) {
         switch (event.kind) {
           case 'session_started':
             sessionID = event.sessionID
@@ -687,7 +811,7 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
       const nowT = now()
 
       if (sessionID !== '') {
-        const artifacts = await host.listArtifacts(sessionID)
+        const artifacts = await host.listArtifacts(scope, sessionID)
         for (const artifact of artifacts) {
           upsertRuntimeArtifact(
             store,
@@ -809,7 +933,11 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
       if (run.state === 'completed' || run.state === 'failed' || run.state === 'cancelled') {
         throw MuError.invalidTransition(`Run ${runID} is already terminal (${run.state}).`)
       }
-      await host.interrupt(run.nativeThreadID ?? run.id)
+      const endpoint = fetchEndpoint(store, run.endpointID)
+      if (endpoint === undefined) {
+        throw MuError.recordNotFound(`Endpoint ${run.endpointID} was not found.`)
+      }
+      await host.interrupt(endpointScope(endpoint), run.nativeThreadID ?? run.id)
       const updated: RunRecord = { ...run, state: 'cancelled', updatedAt: now() }
       upsertRun(store, updated)
       appendLedger(store, {
@@ -919,7 +1047,7 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
     },
 
     buildContextPack(params) {
-      return buildProjectContextPack(store, {
+      const pack = buildProjectContextPack(store, {
         projectID: params.projectID,
         taskID: params.taskID,
         workspaceID: params.workspaceID,
@@ -928,8 +1056,11 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
         bindingID: uuid(),
         actorID: params.actorID,
         principalID: params.principalID,
+        includedContextRecordIDs: params.contextRecordIDs,
         createdAt: now(),
       })
+      insertProjectContextPack(store, pack)
+      return pack
     },
 
     resolveConflict(params) {
@@ -1165,15 +1296,45 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
       return fetchRuntimeArtifacts(store, taskID)
     },
 
-    async discoverHistory(workspacePath) {
+    async discoverHistory(endpointID, workspacePath) {
       if (host.discoverHistory === undefined) return []
-      return host.discoverHistory(workspacePath)
+      const endpoint = fetchEndpoint(store, endpointID)
+      if (endpoint === undefined) {
+        throw MuError.recordNotFound(`Endpoint ${endpointID} was not found.`)
+      }
+      return host.discoverHistory(endpointScope(endpoint), workspacePath)
+    },
+
+    async hydrateHistory(endpointID, candidate) {
+      if (host.hydrateHistory === undefined) {
+        throw MuError.capabilityMissing('This host does not support history hydration.')
+      }
+      const endpoint = fetchEndpoint(store, endpointID)
+      if (endpoint === undefined) {
+        throw MuError.recordNotFound(`Endpoint ${endpointID} was not found.`)
+      }
+      return host.hydrateHistory(endpointScope(endpoint), candidate)
+    },
+
+    async warmEndpoints() {
+      if (host.warmEndpoint === undefined) return
+      const endpoints = fetchEndpoints(store).filter((endpoint) =>
+        endpoint.status === 'active' || endpoint.status === 'discovered'
+      )
+      await Promise.all(endpoints.map(async (endpoint) => {
+        try {
+          await host.warmEndpoint!(endpointScope(endpoint))
+        } catch {
+          // Warm-up is intentionally best effort. The first turn still has a
+          // correct start path when an endpoint was offline during launch.
+        }
+      }))
     },
 
     async probeEndpoints() {
       const outcomes: ProbeOutcome[] = []
       for (const endpoint of fetchEndpoints(store)) {
-        const result = await host.probe()
+        const result = await host.probe(endpointScope(endpoint))
         const probedAt = now()
         const updated: RuntimeEndpoint = {
           ...endpoint,
@@ -1206,6 +1367,19 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
 // ---------------------------------------------------------------------------
 // Small local helpers
 // ---------------------------------------------------------------------------
+
+function isPlaceholderTaskTitle(title: string): boolean {
+  return ['new task', 'untitled task', 'new workspace task'].includes(title.trim().toLowerCase())
+}
+
+function summarizeFirstTaskMessage(text: string): string | undefined {
+  const words = text.trim().split(/\s+/u)
+  while (words[0]?.startsWith('@') === true) words.shift()
+  if (words[0]?.toLowerCase() === 'code') words.shift()
+  const candidate = words.join(' ').split(/[.!?\n]/u, 1)[0]?.trim()
+  if (candidate === undefined || candidate === '') return undefined
+  return candidate.length > 72 ? `${candidate.slice(0, 71)}…` : candidate
+}
 
 /**
  * Instance identity for a registered endpoint. Callers can override any

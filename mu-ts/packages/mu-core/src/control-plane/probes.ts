@@ -1,6 +1,8 @@
 import type { Harness } from '../harness/types.ts'
 import type { UUID } from '../identity.ts'
 import type { RuntimeEndpoint } from '../models.ts'
+import { toAgentHostAdapter } from '../host-adapter/harness-adapter.ts'
+import type { AgentRuntimeEndpointScope } from '../types.ts'
 import {
   fetchEndpoints,
   upsertEndpoint,
@@ -32,8 +34,21 @@ export async function probeEndpoints(
   now: () => Date = () => new Date(),
 ): Promise<EndpointProbeOutcome[]> {
   const outcomes: EndpointProbeOutcome[] = []
+  const host = toAgentHostAdapter(harness)
   for (const endpoint of fetchEndpoints(store)) {
-    const result = await harness.probe()
+    const scope: AgentRuntimeEndpointScope = {
+      endpointID: endpoint.id,
+      runtimeTypeID: endpoint.runtimeTypeID,
+      displayName: endpoint.displayName,
+      instanceIdentity: endpoint.instanceIdentity ?? {
+        provider: { rawValue: endpoint.nativeConfiguration?.['provider'] ?? 'claude_code' },
+        surfaceKind: endpoint.location === 'local' ? 'terminal_cli' : 'remote_service',
+        identityBasis: 'endpoint_fallback',
+        stableInstanceKey: `endpoint:${endpoint.id}`,
+        instanceLabel: endpoint.displayName,
+      },
+    }
+    const result = await host.probe(scope)
     const probedAt = now()
     const status: RuntimeEndpoint['status'] = result.ok ? 'active' : 'offline'
     const updated: RuntimeEndpoint = { ...endpoint, status, lastProbedAt: probedAt }
@@ -56,13 +71,7 @@ export async function probeEndpoints(
           { operation: 'interrupt', support: harness.capabilities.supportsInterrupt ? 'supported' : 'unsupported' },
           { operation: 'artifact.list', support: harness.capabilities.supportsArtifacts ? 'supported' : 'unsupported' },
         ],
-        instanceIdentity: {
-          provider: { rawValue: endpoint.nativeConfiguration?.['provider'] ?? 'claude_code' },
-          surfaceKind: endpoint.location === 'local' ? 'terminal_cli' : 'remote_service',
-          identityBasis: 'installation',
-          stableInstanceKey: `endpoint:${endpoint.id}`,
-          instanceLabel: endpoint.displayName,
-        },
+        instanceIdentity: scope.instanceIdentity,
         notes: [],
       },
       probedAt,

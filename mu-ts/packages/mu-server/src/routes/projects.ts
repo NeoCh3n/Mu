@@ -24,6 +24,10 @@ interface EndpointBody {
   readonly location: string
 }
 
+interface ProjectUpdateBody {
+  readonly displayName?: string
+}
+
 export function registerProjectsRoutes(app: FastifyInstance, ctx: RouteContext): void {
   const { service } = ctx
 
@@ -40,6 +44,18 @@ export function registerProjectsRoutes(app: FastifyInstance, ctx: RouteContext):
       ownerPrincipalID: (body.ownerPrincipalID ?? 'local-user') as never,
     })
     return { project }
+  })
+
+  app.patch('/projects/:id', async (request: FastifyRequest<{ Params: { id: string }; Body: ProjectUpdateBody }>, reply: FastifyReply) => {
+    const displayName = request.body?.displayName
+    if (typeof displayName !== 'string' || displayName.trim() === '') {
+      return reply.status(400).send({ error: 'bad_request', message: 'displayName is required.' })
+    }
+    return { project: service.renameProject(request.params.id as never, displayName) }
+  })
+
+  app.delete('/projects/:id', async (request: FastifyRequest<{ Params: { id: string } }>) => {
+    return { project: service.removeProject(request.params.id as never) }
   })
 
   app.get('/agents', async () => ({ agents: service.listAgents() }))

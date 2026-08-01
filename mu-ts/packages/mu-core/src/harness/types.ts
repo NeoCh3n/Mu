@@ -1,7 +1,9 @@
 import type { TaskRecord } from '../models.ts'
+import type { ReasoningEffort } from '../types.ts'
 import type { ProjectContextPackRecord } from '../project-kernel/index.ts'
 import type { ExternalConversationCandidate } from '../conversation-history.ts'
 import type { ConversationProvider } from '../types.ts'
+import type { AgentRuntimeEndpointScope } from '../types.ts'
 import type { RuntimeControlMode, RuntimeObservationFidelity } from '../runtime-gateway/manifest.ts'
 
 // ---------------------------------------------------------------------------
@@ -124,6 +126,8 @@ export interface HarnessTurnInput {
   readonly sessionID?: string
   readonly resumeSessionID?: string
   readonly promptOverride?: string
+  /** Provider-neutral reasoning budget selected by Mu's routing policy. */
+  readonly reasoningEffort?: Exclude<ReasoningEffort, 'auto'>
   /** User message text (QM mode derives its turn request from this). */
   readonly text?: string
   /** Local-mode context: task + bounded Context Pack used to build the prompt. */
@@ -154,4 +158,26 @@ export interface Harness {
    * them). Optional — hosts without history support omit it.
    */
   discoverHistory?(workspacePath: string): Promise<ExternalConversationCandidate[]>
+  /** Endpoint-scoped variants used by the stable AgentHostAdapter contract. */
+  probeEndpoint?(scope: AgentRuntimeEndpointScope): Promise<HarnessProbeResult>
+  runTurnForEndpoint?(
+    scope: AgentRuntimeEndpointScope,
+    input: HarnessTurnInput,
+    signal?: AbortSignal,
+  ): AsyncIterable<HarnessTurnEvent>
+  interruptForEndpoint?(scope: AgentRuntimeEndpointScope, sessionID: string): Promise<void>
+  listArtifactsForEndpoint?(
+    scope: AgentRuntimeEndpointScope,
+    sessionID: string,
+  ): Promise<HarnessArtifactRecord[]>
+  discoverHistoryForEndpoint?(
+    scope: AgentRuntimeEndpointScope,
+    workspacePath: string,
+  ): Promise<ExternalConversationCandidate[]>
+  hydrateHistoryForEndpoint?(
+    scope: AgentRuntimeEndpointScope,
+    candidate: ExternalConversationCandidate,
+  ): Promise<ExternalConversationCandidate>
+  /** Prepares a long-lived endpoint connection without starting a turn. */
+  warmEndpoint?(scope: AgentRuntimeEndpointScope): Promise<void>
 }

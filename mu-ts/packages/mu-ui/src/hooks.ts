@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
 /**
  * Live SSE subscription to GET /api/events. Returns a rolling buffer of
@@ -59,5 +59,6 @@ export function useQuery<T>(loader: () => Promise<T>, deps: readonly unknown[] =
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, tick])
 
-  return { data, error, reload: () => setTick((t) => t + 1) }
+  const reload = useCallback(() => setTick((t) => t + 1), [])
+  return { data, error, reload }
 }

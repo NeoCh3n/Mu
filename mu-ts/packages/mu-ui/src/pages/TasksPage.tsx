@@ -42,9 +42,10 @@ export function TasksPage() {
   }
 
   return (
-    <Page title="Tasks">
+    <Page title="Projects" subtitle="Tasks are conversations and execution records nested inside a Project.">
       {error !== undefined && <ErrorBanner message={error} />}
       <div className="mb-6 grid grid-cols-2 gap-2">
+        <div className="col-span-2 text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">New Task</div>
         <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title" className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm" />
         <input value={repositoryPath} onChange={(e) => setRepositoryPath(e.target.value)} placeholder="Repository path" className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm" />
         <input value={objective} onChange={(e) => setObjective(e.target.value)} placeholder="Objective" className="col-span-2 rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm" />

@@ -5,6 +5,17 @@ import Testing
 @Suite(.serialized)
 struct ConversationHistoryTests {
     @Test
+    func conversationProviderReadsLegacyRawValueWrapper() throws {
+        let provider = try MuCoding.makeDecoder().decode(
+            ConversationProvider.self,
+            from: Data(#"{"rawValue":"codex"}"#.utf8)
+        )
+        #expect(provider == .codex)
+        let encoded = try MuCoding.makeEncoder().encode(provider)
+        #expect(String(decoding: encoded, as: UTF8.self) == #""codex""#)
+    }
+
+    @Test
     func codexParserKeepsOnlyPortableVisibleConversation() throws {
         let response: [String: Any] = [
             "thread": [

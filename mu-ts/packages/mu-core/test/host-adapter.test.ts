@@ -8,6 +8,7 @@ import { uuid } from '../src/identity.ts'
 import { createTaskRecord } from '../src/models.ts'
 import { createProjectContextPackRecord } from '../src/project-kernel/index.ts'
 import { CLAUDE_CODE_PROVIDER } from '../src/types.ts'
+import type { AgentRuntimeEndpointScope } from '../src/types.ts'
 import type { Harness, HarnessTurnEvent } from '../src/harness/types.ts'
 
 // ---------------------------------------------------------------------------
@@ -53,10 +54,26 @@ function taskAndPack() {
   return { task, pack }
 }
 
+function scope(): AgentRuntimeEndpointScope {
+  return {
+    endpointID: uuid(),
+    runtimeTypeID: 'anthropic.claude-code/cli',
+    displayName: 'Claude Code test terminal',
+    instanceIdentity: {
+      provider: CLAUDE_CODE_PROVIDER,
+      surfaceKind: 'terminal_cli',
+      identityBasis: 'terminal_identifier',
+      stableInstanceKey: 'claude:test-terminal-1',
+      instanceLabel: 'Claude Code test terminal',
+      terminalIdentifier: 'test-terminal-1',
+    },
+  }
+}
+
 async function collect(host: AgentHostAdapter) {
   const { task, pack } = taskAndPack()
   const events: HarnessTurnEvent[] = []
-  for await (const event of host.submit({ provider: CLAUDE_CODE_PROVIDER, task, contextPack: pack, text: 'Go.' })) {
+  for await (const event of host.submit(scope(), { provider: CLAUDE_CODE_PROVIDER, task, contextPack: pack, text: 'Go.' })) {
     events.push(event)
   }
   return events
@@ -92,6 +109,49 @@ describe('AgentHostAdapter contract', () => {
     expect(events.at(-1)?.kind).toBe('completed')
   })
 
+  it('forwards endpoint scope to endpoint-aware harness methods', async () => {
+    const received: string[] = []
+    const base = mockHarness()
+    const endpoint = scope()
+    const harness: Harness = {
+      ...base,
+      async probeEndpoint(receivedScope) {
+        received.push(`probe:${receivedScope.endpointID}`)
+        return { ok: true, mode: 'local', message: 'scoped', latencyMilliseconds: 0 }
+      },
+      async *runTurnForEndpoint(receivedScope) {
+        received.push(`turn:${receivedScope.instanceIdentity.stableInstanceKey}`)
+        yield { kind: 'completed', result: { status: 'success', sessionID: 'scoped-1', output: 'scoped' } }
+      },
+      async interruptForEndpoint(receivedScope, sessionID) {
+        received.push(`interrupt:${receivedScope.endpointID}:${sessionID}`)
+      },
+      async listArtifactsForEndpoint(receivedScope, sessionID) {
+        received.push(`artifacts:${receivedScope.endpointID}:${sessionID}`)
+        return []
+      },
+    }
+    const host = toAgentHostAdapter(harness)
+    await host.probe(endpoint)
+    const { task, pack } = taskAndPack()
+    for await (const _event of host.submit(endpoint, {
+      provider: CLAUDE_CODE_PROVIDER,
+      task,
+      contextPack: pack,
+      text: 'Go.',
+    })) {
+      // Consume the terminal event.
+    }
+    await host.interrupt(endpoint, 'scoped-1')
+    await host.listArtifacts(endpoint, 'scoped-1')
+    expect(received).toEqual([
+      `probe:${endpoint.endpointID}`,
+      `turn:${endpoint.instanceIdentity.stableInstanceKey}`,
+      `interrupt:${endpoint.endpointID}:scoped-1`,
+      `artifacts:${endpoint.endpointID}:scoped-1`,
+    ])
+  })
+
   it('forwards interrupt and listArtifacts', async () => {
     let interrupted = false
     const harness: Harness = {
@@ -110,9 +170,9 @@ describe('AgentHostAdapter contract', () => {
       },
     }
     const host = toAgentHostAdapter(harness)
-    await host.interrupt('s-1')
+    await host.interrupt(scope(), 's-1')
     expect(interrupted).toBe(true)
-    const artifacts = await host.listArtifacts('s-1')
+    const artifacts = await host.listArtifacts(scope(), 's-1')
     expect(artifacts).toHaveLength(1)
     expect(artifacts[0]?.name).toBe('a.txt')
   })

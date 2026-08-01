@@ -106,18 +106,21 @@ export interface MuApp {
 }
 
 export function buildApp(config: MuAppConfig): MuApp {
-  const store = new SQLiteStore({
-    dataDirectory: config.dataDirectory,
-    filename: config.filename ?? 'mu.sqlite',
-  })
   const now = config.now ?? (() => new Date())
   const hub = new SSEEventHub()
 
+  let store: SQLiteStore
   let harness: Harness
   if (config.harness !== undefined) {
+    store = new SQLiteStore({
+      dataDirectory: config.dataDirectory,
+      filename: config.filename ?? 'mu.sqlite',
+    })
     harness = config.harness
   } else {
-    // Local mode: discover executables and seed default agents/endpoints.
+    // Local mode: bootstrap owns the single SQLite connection and seeds the
+    // same store that the server service will use. Opening a second store here
+    // would leave a live connection behind and weaken the single-writer rule.
     const bootstrapped = bootstrapLocalControlPlane({
       dataDirectory: config.dataDirectory,
       filename: config.filename,
@@ -126,6 +129,7 @@ export function buildApp(config: MuAppConfig): MuApp {
       principalID: config.principalID,
       now,
     })
+    store = bootstrapped.store
     harness = bootstrapped.harness
   }
 
@@ -137,6 +141,10 @@ export function buildApp(config: MuAppConfig): MuApp {
     onEvent: (event) => hub.publish('turn', event),
   }
   const service = createControlPlaneService(deps)
+
+  // Warm long-lived local hosts in the background so a new Project does not
+  // pay for app-server process creation and protocol initialization.
+  void service.warmEndpoints()
 
   // Every deployment has at least one routable endpoint: injected harnesses
   // (tests, QM) get a managed default; the bootstrapped path keeps its own.
@@ -171,7 +179,7 @@ export function buildApp(config: MuAppConfig): MuApp {
     harness,
     close: async () => {
       await app.close()
-      store.close()
+      service.close()
     },
   }
 }

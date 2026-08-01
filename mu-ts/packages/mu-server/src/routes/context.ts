@@ -9,6 +9,8 @@ interface ImportBody {
   readonly text: string
   readonly sourceActorID?: string
   readonly externalRef?: string
+  readonly runtimeEndpointID?: string
+  readonly runtimeSessionID?: string
   readonly confidence?: number
 }
 
@@ -48,6 +50,8 @@ export function registerContextRoutes(app: FastifyInstance, ctx: RouteContext): 
       text: body.text,
       sourceActorID: (body.sourceActorID ?? body.projectID) as never,
       externalRef: body.externalRef,
+      runtimeEndpointID: body.runtimeEndpointID as never,
+      runtimeSessionID: body.runtimeSessionID,
       confidence: body.confidence,
     })
     return { record }

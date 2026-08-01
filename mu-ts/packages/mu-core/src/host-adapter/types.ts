@@ -1,5 +1,6 @@
 import type { ExternalConversationCandidate } from '../conversation-history.ts'
 import type { HarnessCapabilities } from '../harness/types.ts'
+import type { AgentRuntimeEndpointScope } from '../types.ts'
 import type {
   HarnessArtifactRecord,
   HarnessPendingApproval,
@@ -36,6 +37,7 @@ export type { HarnessProbeResult as HostProbeResult }
 export type { HarnessArtifactRecord as HostArtifactRecord }
 export type { HarnessPendingApproval as HostApprovalRequest }
 export type { ExternalConversationCandidate as HostHistoryCandidate }
+export type { AgentRuntimeEndpointScope as HostEndpointScope } from '../types.ts'
 
 /** How this host participates in approval flows. */
 export const HostApprovalSupport = {
@@ -113,23 +115,37 @@ export interface AgentHostAdapter {
   readonly hostID: string
   readonly capabilities: HostCapabilities
   /** Probes host availability, version, and login state. */
-  probe(): Promise<HarnessProbeResult>
+  probe(scope: AgentRuntimeEndpointScope): Promise<HarnessProbeResult>
   /**
    * Submits one bounded turn and streams its events. Consume the generator
    * to completion; terminal events are 'completed' | 'failed' | 'cancelled'.
    */
-  submit(input: HarnessTurnInput, signal?: AbortSignal): AsyncIterable<HarnessTurnEvent>
+  submit(
+    scope: AgentRuntimeEndpointScope,
+    input: HarnessTurnInput,
+    signal?: AbortSignal,
+  ): AsyncIterable<HarnessTurnEvent>
   /** Interrupts an active turn (local: child process; QM: run ID). */
-  interrupt(sessionID: string): Promise<void>
+  interrupt(scope: AgentRuntimeEndpointScope, sessionID: string): Promise<void>
   /** Forwards an approval decision to the host when resolveForward is set. */
   resolveApproval?(resolution: HostApprovalResolution): Promise<void>
-  listArtifacts(sessionID: string): Promise<HarnessArtifactRecord[]>
+  listArtifacts(scope: AgentRuntimeEndpointScope, sessionID: string): Promise<HarnessArtifactRecord[]>
   /**
    * Discovers past conversations for a workspace. Host-internal visibility:
    * the same host process that ran the turns must be queried (Codex threads
    * are process-scoped). Optional — hosts without history omit it.
    */
-  discoverHistory?(workspacePath: string): Promise<ExternalConversationCandidate[]>
+  discoverHistory?(
+    scope: AgentRuntimeEndpointScope,
+    workspacePath: string,
+  ): Promise<ExternalConversationCandidate[]>
+  /** Hydrates visible user/assistant messages for one discovered conversation. */
+  hydrateHistory?(
+    scope: AgentRuntimeEndpointScope,
+    candidate: ExternalConversationCandidate,
+  ): Promise<ExternalConversationCandidate>
+  /** Prepares a long-lived endpoint connection without starting a turn. */
+  warmEndpoint?(scope: AgentRuntimeEndpointScope): Promise<void>
   /** Stops long-lived host processes (codex app-server, SSE streams). */
   stop?(): void
 }

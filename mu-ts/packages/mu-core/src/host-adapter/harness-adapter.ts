@@ -6,6 +6,7 @@ import type {
   HostApprovalSupport,
   HostCapabilities,
 } from './types.ts'
+import type { AgentRuntimeEndpointScope } from '../types.ts'
 
 // ---------------------------------------------------------------------------
 // Harness → AgentHostAdapter
@@ -52,13 +53,27 @@ export function toAgentHostAdapter(
   const adapter: AgentHostAdapter = {
     hostID: options.hostID ?? defaultHostID(harness),
     capabilities,
-    probe: () => harness.probe(),
-    submit: (input, signal) => harness.runTurn(input, signal),
-    interrupt: (sessionID) => harness.interrupt(sessionID),
+    probe: (scope) => harness.probeEndpoint?.(scope) ?? harness.probe(),
+    submit: (scope, input, signal) => harness.runTurnForEndpoint?.(scope, input, signal)
+      ?? harness.runTurn(input, signal),
+    interrupt: (scope, sessionID) => harness.interruptForEndpoint?.(scope, sessionID)
+      ?? harness.interrupt(sessionID),
     ...(options.resolveApproval !== undefined ? { resolveApproval: options.resolveApproval } : {}),
-    listArtifacts: (sessionID) => harness.listArtifacts(sessionID),
-    ...(typeof harness.discoverHistory === 'function'
-      ? { discoverHistory: (workspacePath: string) => harness.discoverHistory!(workspacePath) }
+    listArtifacts: (scope, sessionID) => harness.listArtifactsForEndpoint?.(scope, sessionID)
+      ?? harness.listArtifacts(sessionID),
+    ...(typeof harness.discoverHistory === 'function' || typeof harness.discoverHistoryForEndpoint === 'function'
+      ? {
+          discoverHistory: (scope: AgentRuntimeEndpointScope, workspacePath: string) =>
+            harness.discoverHistoryForEndpoint?.(scope, workspacePath)
+              ?? harness.discoverHistory?.(workspacePath)
+              ?? Promise.resolve([]),
+        }
+      : {}),
+    ...(typeof harness.hydrateHistoryForEndpoint === 'function'
+      ? { hydrateHistory: (scope: AgentRuntimeEndpointScope, candidate) => harness.hydrateHistoryForEndpoint!(scope, candidate) }
+      : {}),
+    ...(typeof harness.warmEndpoint === 'function'
+      ? { warmEndpoint: (scope: AgentRuntimeEndpointScope) => harness.warmEndpoint!(scope) }
       : {}),
     ...('stop' in harness && typeof harness.stop === 'function'
       ? { stop: () => (harness as Harness & { stop: () => void }).stop() }

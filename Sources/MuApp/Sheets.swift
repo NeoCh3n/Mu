@@ -145,7 +145,7 @@ struct NewTaskSheet: View {
                     fieldGroup("AGENT IDENTITY") {
                         Picker("Agent identity", selection: $draft.agentIdentityID) {
                             Text("Choose an agent").tag(UUID?.none)
-                            ForEach(store.agents) { agent in
+                            ForEach(store.selectableAgentIdentities) { agent in
                                 Text("\(agent.displayName) · \(agent.role.displayName)")
                                     .tag(Optional(agent.id))
                             }
@@ -246,7 +246,8 @@ struct NewTaskSheet: View {
                 draft.repositoryPath = existingProjectPath
             }
             if draft.agentIdentityID == nil {
-                draft.agentIdentityID = store.preselectedAgentID ?? store.agents.first?.id
+                draft.agentIdentityID = store.preselectedAgentID
+                    ?? store.selectableAgentIdentities.first?.id
             }
             if draft.sourceEndpointID == nil {
                 let preferredID = store.agent(id: draft.agentIdentityID)?.preferredEndpointID

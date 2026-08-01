@@ -13,10 +13,17 @@ interface TaskBody {
   readonly constraints?: readonly string[]
 }
 
+interface TaskQuery {
+  readonly projectID?: string
+}
+
 export function registerTasksRoutes(app: FastifyInstance, ctx: RouteContext): void {
   const { service } = ctx
 
-  app.get('/tasks', async () => ({ tasks: service.listTasks() }))
+  app.get('/tasks', async (request: FastifyRequest<{ Querystring: TaskQuery }>) => {
+    const tasks = service.listTasks()
+    return { tasks: request.query.projectID === undefined ? tasks : tasks.filter((task) => task.projectID === request.query.projectID) }
+  })
 
   app.get('/tasks/:id', async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
     const task = service.fetchTask(request.params.id as never)

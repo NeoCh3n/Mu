@@ -13,23 +13,30 @@ Mu 的 ControlPlaneService 只通过 `AgentHostAdapter` 与执行宿主对话。
 - 宿主拿到的只是**受控的 Bounded Context Pack**（SHA-256 校验）
 - 宿主的输出回到 Mu 后只是 Candidate / Artifact，必须经 Mu Review
 
-## 契约（7 个能力）
+## 契约（endpoint-scoped 能力）
 
 ```typescript
 export interface AgentHostAdapter {
   readonly hostID: string                    // 'claude-code.cli' / 'codex.app-server' / 'qm.bridge'
   readonly capabilities: HostCapabilities    // 能力声明（含 approvals / deliveryReceipt）
 
-  probe(): Promise<HostProbeResult>                       // 探活、版本、登录态
-  submit(input: HostTurnInput, signal?: AbortSignal):     // 提交一轮受控 turn，
+  probe(scope: HostEndpointScope): Promise<HostProbeResult> // 按 endpoint 探活、版本、登录态
+  submit(scope: HostEndpointScope, input: HostTurnInput, signal?: AbortSignal): // 提交一轮受控 turn，
     AsyncIterable<HostTurnEvent>                           //   流式事件直到终态
-  interrupt(sessionID: string): Promise<void>             // 中断活跃 turn
+  interrupt(scope: HostEndpointScope, sessionID: string): Promise<void> // 中断活跃 turn
   resolveApproval?(resolution: HostApprovalResolution):   // 可选：审批决策回传宿主
     Promise<void>
-  listArtifacts(sessionID: string): Promise<HostArtifactRecord[]>
+  listArtifacts(scope: HostEndpointScope, sessionID: string): Promise<HostArtifactRecord[]>
+  discoverHistory?(scope: HostEndpointScope, workspacePath: string): Promise<HostHistoryCandidate[]>
+  hydrateHistory?(scope: HostEndpointScope, candidate: HostHistoryCandidate): Promise<HostHistoryCandidate>
   stop?(): void                                           // 停止长驻宿主进程
 }
 ```
+
+`HostEndpointScope` carries the endpoint ID, runtime type, display name, and
+the full `AgentRuntimeInstanceIdentity`. Every operation is evaluated against
+that scope; a provider string by itself is never sufficient to select a
+terminal or desktop instance.
 
 | 能力 | 语义 | 本地宿主 | QM Bridge（实验） |
 |---|---|---|---|
@@ -64,7 +71,7 @@ cancelled                              // 中止（无结果）
 
 ## 宿主实现要求
 
-1. 实现 `AgentHostAdapter` 全部必选方法；能力不符的字段如实声明（`supportsArtifacts: false`
+1. 实现 `AgentHostAdapter` 全部必选方法；每次操作必须接收并校验 `HostEndpointScope`，能力不符的字段如实声明（`supportsArtifacts: false`
    等），不得虚假上报
 2. `submit` 的输入只接受 Mu 构造的 `HostTurnInput`（含 Context Pack）；禁止宿主自行
    读取 Mu 数据库

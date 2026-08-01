@@ -238,6 +238,89 @@ describe('ControlPlaneService', () => {
     }
   })
 
+  it('summarizes a placeholder task title from its first message', async () => {
+    const { service, cleanup } = makeService()
+    try {
+      const project = service.createProject({ displayName: 'Title Project', ownerPrincipalID: uuid() })
+      const endpoint = service.registerEndpoint({
+        runtimeTypeID: 'anthropic.claude-code/cli',
+        displayName: 'Claude Code',
+        runtimeVersion: '1.0',
+        location: 'local',
+      })
+      const task = service.createTask({
+        projectID: project.id,
+        title: 'New task',
+        objective: 'Start working in Title Project.',
+        repositoryPath: '/tmp/mu-title-project',
+      })
+      await runTurn(service, task.id, '@Claude Code inspect the login flow and add a regression test.')
+
+      expect(service.fetchTask(task.id)?.title).toBe('inspect the login flow and add a regression test')
+      expect(service.fetchLedger().some((event) => event.type === 'task.auto_titled')).toBe(true)
+      expect(endpoint.status).toBe('discovered')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('persists and delivers an immutable Context Pack to a second task', async () => {
+    const { service, cleanup } = makeService()
+    try {
+      const { projectID, taskID, agentID, endpointID } = seedTask(service)
+      const actor = uuid()
+      const record = service.importContextRecord({
+        projectID,
+        taskID,
+        kind: 'finding',
+        subject: 'accepted-fact',
+        text: 'The source runtime reported 60 FPS.',
+        sourceActorID: actor,
+      })
+      service.reviewContextRecord({ recordID: record.id, decision: 'accepted', actorID: actor })
+      const pack = service.buildContextPack({
+        projectID,
+        taskID,
+        workspaceID: projectID,
+        objective: 'Review the source runtime.',
+        endpointID,
+        actorID: actor,
+        principalID: actor,
+      })
+      const target = service.createTask({
+        projectID,
+        title: 'Review through another host',
+        objective: 'Validate the imported source fact.',
+        repositoryPath: '/tmp/mu-renderer',
+        assignedAgentIdentityID: agentID,
+        requestedByActorID: actor,
+      })
+      const selectedForTarget = service.buildContextPack({
+        projectID,
+        taskID: target.id,
+        workspaceID: projectID,
+        objective: target.objective,
+        endpointID,
+        actorID: actor,
+        principalID: actor,
+        contextRecordIDs: [record.id],
+      })
+      expect(selectedForTarget.includedContextRecordIDs).toEqual([record.id])
+      for await (const _event of service.runTaskTurn({
+        taskID: target.id,
+        contextPackID: pack.id,
+        text: 'Use the delivered source fact.',
+      })) {
+        // Consume the terminal event.
+      }
+      const run = service.listRuns(target.id)[0]
+      expect(run?.contextPackID).toBe(pack.id)
+      expect(service.fetchTask(target.id)?.status).toBe('completed')
+    } finally {
+      cleanup()
+    }
+  })
+
   it('marks tasks failed when the harness fails', async () => {
     const harness = harnessWithScript([
       { kind: 'session_started', sessionID: 's-1' },

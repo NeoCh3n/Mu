@@ -7,7 +7,7 @@
 //
 // Acceptance steps (per the P0 plan):
 //   1. Discovery, login, workspace attach
-//   2. Task creation and @agent routing
+//   2. Task creation and assigned-agent routing
 //   3. Live progress, cancel, completion states
 //   4. Import MULTIPLE history conversations (not a single one)
 //   5. Build a bounded Context Pack from the imported history and hand it to
@@ -95,8 +95,8 @@ async function main(): Promise<void> {
       && codexEndpoint?.instanceIdentity?.stableInstanceKey !== claudeEndpoint?.instanceIdentity?.stableInstanceKey,
       codexEndpoint?.instanceIdentity?.instanceLabel ?? 'missing')
 
-    // 2. Task creation and routing ------------------------------------------
-    console.log('\n[2] Task creation and @agent routing')
+    // 2. Task creation and assigned-agent routing ----------------------------
+    console.log('\n[2] Task creation and assigned-agent routing')
     const project = service.createProject({ displayName: 'E2E Acceptance', ownerPrincipalID: uuid() })
     const builder = service.createAgent({
       displayName: 'Builder',
@@ -207,15 +207,29 @@ async function main(): Promise<void> {
     } else {
       // History is host-internal: query through the control plane so the
       // SAME codex app-server process that ran the turns answers.
-      const candidates = await withTimeout(service.discoverHistory(workspace), 60_000, 'discoverHistory')
+      const candidates = await withTimeout(
+        service.discoverHistory(codexEndpoint!.id, workspace),
+        60_000,
+        'discoverHistory',
+      )
       check('history discovered (multiple)', candidates.length >= 2, `${candidates.length} conversation(s)`)
+      const hydratedCandidates = []
       for (const candidate of candidates.slice(0, 2)) {
+        const hydrated = await withTimeout(
+          service.hydrateHistory(codexEndpoint!.id, candidate),
+          60_000,
+          `hydrateHistory:${candidate.nativeSessionID}`,
+        )
+        hydratedCandidates.push(hydrated)
         const record = service.importContextRecord({
           projectID: project.id,
           taskID: codexTask.id,
           kind: 'finding',
           subject: `history:${candidate.nativeSessionID.slice(0, 12)}`,
-          text: candidate.title.length > 200 ? candidate.title.slice(0, 200) : candidate.title,
+          text: hydrated.messages
+            .map((message) => `${message.role}: ${message.text}`)
+            .join('\n')
+            .slice(0, 20_000),
           sourceActorID: researcher.id,
           externalRef: candidate.nativeSessionID,
           runtimeEndpointID: codexEndpoint!.id,
@@ -225,6 +239,9 @@ async function main(): Promise<void> {
       }
       check('imported + accepted records', imported.length === 2
         && service.listContextRecords(project.id).filter((r) => r.status === 'accepted').length === 2)
+      check('history messages hydrated', hydratedCandidates.length === 2
+        && hydratedCandidates.every((candidate) => candidate.messages.length > 0),
+      hydratedCandidates.map((candidate) => candidate.messages.length).join(','))
     }
 
     // 5. Bounded Context Pack → hand to the OTHER agent ----------------------
@@ -242,7 +259,8 @@ async function main(): Promise<void> {
       check('pack built (empty history in skip mode)', pack.contentSHA256.match(/^[0-9a-f]{64}$/) !== null)
     } else {
       check('pack built from imported history', pack.includedContextRecordIDs.length === 2
-        && pack.contentSHA256.match(/^[0-9a-f]{64}$/) !== null)
+        && pack.contentSHA256.match(/^[0-9a-f]{64}$/) !== null
+        && (pack.renderedContextMarkdown ?? '').includes('assistant:'))
     }
     if (!skipTurns) {
       const handoffTask = service.createTask({
@@ -253,12 +271,17 @@ async function main(): Promise<void> {
         assignedAgentIdentityID: builder.id,
         requestedByActorID: uuid(),
       })
-      // The pack's objective is delivered to Claude via the task context; run
-      // the turn and confirm the imported history influenced the reply.
+      // Explicitly deliver the immutable Codex-derived pack to the new Claude
+      // task. The run and binding prove which pack reached which endpoint.
       const events: Array<{ kind: string }> = []
       await withTimeout(
         (async () => {
-          for await (const event of service.runTaskTurn({ taskID: handoffTask.id, text: 'Review the pipeline and confirm the FPS claim.' })) {
+          for await (const event of service.runTaskTurn({
+            taskID: handoffTask.id,
+            endpointID: claudeEndpoint!.id,
+            contextPackID: pack.id,
+            text: 'Review the pipeline and confirm the FPS claim.',
+          })) {
             events.push(event)
           }
         })(),
@@ -267,7 +290,11 @@ async function main(): Promise<void> {
       )
       check('cross-host turn completed', service.fetchTask(handoffTask.id)?.status === 'completed')
       const handoffChat = service.listChatEntries(handoffTask.id).find((e) => e.authorKind === 'agent')
-      check('cross-host reply references pack', handoffChat !== undefined && handoffChat.text.length > 0,
+      const handoffRun = service.listRuns(handoffTask.id)[0]
+      const handoffBinding = service.listSessionBindings(handoffTask.id)[0]
+      check('cross-host Context Pack delivered', handoffRun?.contextPackID === pack.id
+        && handoffBinding?.endpointID === claudeEndpoint!.id
+        && handoffChat !== undefined && handoffChat.text.length > 0,
         handoffChat === undefined ? 'no agent chat' : `${handoffChat.text.length} chars`)
       void events
     } else {
@@ -315,9 +342,12 @@ async function main(): Promise<void> {
   }
 
   console.log('\n' + '='.repeat(64))
-  console.log(failures === 0
-    ? 'ACCEPTANCE PASSED — Codex + Claude Code are real-usable on this machine.'
-    : `ACCEPTANCE FAILED — ${failures} check(s) failed.`)
+  const resultMessage = failures !== 0
+    ? `ACCEPTANCE FAILED — ${failures} check(s) failed.`
+    : skipTurns
+      ? 'SMOKE PASSED — probes, wiring, and local persistence checks passed; real turns and cross-host execution were skipped.'
+      : 'ACCEPTANCE PASSED — Codex + Claude Code real turns, hydrated history, and cross-host Context Pack delivery passed.'
+  console.log(resultMessage)
   process.exit(failures === 0 ? 0 : 1)
 }
 
