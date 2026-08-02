@@ -86,11 +86,15 @@ extension ControlPlaneService {
             runtimeBindingID: bindingID,
             taskLeaseID: lease.id
         )
-        let initialPrompt = contextPack.renderedMarkdown
-            + (workspaceEntry.map {
-                "\n\n# Current Project message\n\n"
-                    + ($0.routedText ?? $0.text)
-            } ?? "")
+        let promptPreferences = runtimePromptPreferences
+        let initialPrompt = RuntimePromptPreferences.taskPrompt(
+            contextPack: contextPack.renderedMarkdown,
+            projectMessage: workspaceEntry.map {
+                $0.routedText ?? $0.text
+            },
+            additionalInstructions:
+                promptPreferences.claudeCodeAdditionalInstructions
+        )
         let sessionID = UUID().uuidString.lowercased()
         let turnID = UUID().uuidString.lowercased()
         var binding = RuntimeSessionBinding(
@@ -225,6 +229,8 @@ extension ControlPlaneService {
                 contextPack: contextPack,
                 sessionID: sessionID,
                 promptOverride: initialPrompt,
+                additionalSystemPrompt:
+                    promptPreferences.claudeCodeAdditionalInstructions,
                 onSessionStarted: {
                     [weak self] nativeSessionID in
                     guard let self else { return }

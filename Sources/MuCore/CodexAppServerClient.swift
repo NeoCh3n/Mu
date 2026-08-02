@@ -330,6 +330,7 @@ public final class CodexAppServerClient {
         agent: AgentIdentity?,
         contextPack: ProjectContextPackRecord? = nil,
         promptOverride: String? = nil,
+        additionalInstructions: String = "",
         clientUserMessageID: String,
         timeout: TimeInterval = 600,
         onThreadStarted: (String) throws -> Void = { _ in },
@@ -341,7 +342,10 @@ public final class CodexAppServerClient {
     ) throws -> CodexTurnResult {
         try runReadOnlyTurn(
             task: task,
-            developerInstructions: taskDeveloperInstructions(agent: agent),
+            developerInstructions: taskDeveloperInstructions(
+                agent: agent,
+                additionalInstructions: additionalInstructions
+            ),
             prompt:
                 promptOverride
                 ?? contextPack?.renderedMarkdown
@@ -1319,7 +1323,10 @@ public final class CodexAppServerClient {
             ?? ISO8601DateFormatter().date(from: string)
     }
 
-    private func taskDeveloperInstructions(agent: AgentIdentity?) -> String {
+    private func taskDeveloperInstructions(
+        agent: AgentIdentity?,
+        additionalInstructions: String = ""
+    ) -> String {
         let identityContract: String
         if let agent {
             let tags = agent.capabilityTags.isEmpty
@@ -1331,13 +1338,17 @@ public final class CodexAppServerClient {
         } else {
             identityContract = "Act as the runtime-neutral execution agent selected by Mu. "
         }
-        return identityContract
+        let base = identityContract
             + "This is a strictly read-only task. You may inspect files and run commands only "
             + "when they cannot mutate the workspace. Do not create, edit, rename, or delete "
             + "files; do not use network access; do not request elevated permissions; and do "
             + "not perform destructive actions. If the objective requires a mutation, explain "
             + "the blocked action instead of performing it. Return a concise final answer with "
             + "the evidence you actually observed."
+        return RuntimePromptPreferences.systemPrompt(
+            base: base,
+            additionalInstructions: additionalInstructions
+        )
     }
 
     private func taskPrompt(_ task: TaskRecord) -> String {

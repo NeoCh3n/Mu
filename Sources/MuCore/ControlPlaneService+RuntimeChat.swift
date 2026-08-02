@@ -48,11 +48,14 @@ extension ControlPlaneService {
                 packID: state.contextPack.id,
                 status: .prepared
             )
-            let prompt =
-                state.contextPack.renderedMarkdown
-                + "\n\n# Current Project message\n\n"
-                + (state.entry.routedText
-                    ?? state.entry.text)
+            let promptPreferences = runtimePromptPreferences
+            let prompt = RuntimePromptPreferences.taskPrompt(
+                contextPack: state.contextPack.renderedMarkdown,
+                projectMessage: state.entry.routedText
+                    ?? state.entry.text,
+                additionalInstructions:
+                    promptPreferences.codexAdditionalInstructions
+            )
             let result: CodexTurnResult
             do {
                 result = try client.runReadOnlyContinuation(
@@ -87,6 +90,8 @@ extension ControlPlaneService {
                     task: state.task,
                     agent: nil,
                     promptOverride: prompt,
+                    additionalInstructions:
+                        promptPreferences.codexAdditionalInstructions,
                     clientUserMessageID:
                         state.entry.id.uuidString,
                     onThreadStarted: {
@@ -182,11 +187,14 @@ extension ControlPlaneService {
                 packID: state.contextPack.id,
                 status: .prepared
             )
-            let prompt =
-                state.contextPack.renderedMarkdown
-                + "\n\n# Current Project message\n\n"
-                + (state.entry.routedText
-                    ?? state.entry.text)
+            let promptPreferences = runtimePromptPreferences
+            let prompt = RuntimePromptPreferences.taskPrompt(
+                contextPack: state.contextPack.renderedMarkdown,
+                projectMessage: state.entry.routedText
+                    ?? state.entry.text,
+                additionalInstructions:
+                    promptPreferences.claudeCodeAdditionalInstructions
+            )
             let result = try client.runReadOnlyTask(
                 task: state.task,
                 contextPack: state.contextPack,
@@ -195,6 +203,8 @@ extension ControlPlaneService {
                 resumeSessionID:
                     state.binding.nativeSessionID,
                 promptOverride: prompt,
+                additionalSystemPrompt:
+                    promptPreferences.claudeCodeAdditionalInstructions,
                 onSessionStarted: {
                     [weak self] nativeSessionID in
                     try self?.markManagedContinuationStarted(

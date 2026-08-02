@@ -120,6 +120,8 @@ public final class ControlPlaneService: @unchecked Sendable {
     public let artifactStore: ArtifactStore
 
     let repositoryProbe: GitRepositoryProbe
+    private let runtimePromptLock = NSLock()
+    private var runtimePromptPreferencesStorage = RuntimePromptPreferences.default
     private let openWorkerSyncGate = OpenWorkerSyncGate()
     let codexRuntimeLock = NSLock()
     var activeCodexClients:
@@ -137,6 +139,18 @@ public final class ControlPlaneService: @unchecked Sendable {
     var historyDiscoveryCache:
         [UUID: [String: ExternalConversationCandidate]] = [:]
     var historyDiscoveryCacheOrder: [UUID] = []
+
+    /// Runtime guidance is local, user-owned configuration. The lock lets a
+    /// Settings edit safely take effect for the next turn while a native
+    /// Runtime is running on a background queue.
+    public var runtimePromptPreferences: RuntimePromptPreferences {
+        get { runtimePromptLock.withLock { runtimePromptPreferencesStorage } }
+        set {
+            runtimePromptLock.withLock {
+                runtimePromptPreferencesStorage = newValue
+            }
+        }
+    }
 
     public init(
         dataDirectory: URL? = nil,
@@ -1399,11 +1413,15 @@ public final class ControlPlaneService: @unchecked Sendable {
             runtimeBindingID: bindingID,
             taskLeaseID: lease.id
         )
-        let initialPrompt = contextPack.renderedMarkdown
-            + (workspaceEntry.map {
-                "\n\n# Current Project message\n\n"
-                    + ($0.routedText ?? $0.text)
-            } ?? "")
+        let promptPreferences = runtimePromptPreferences
+        let initialPrompt = RuntimePromptPreferences.taskPrompt(
+            contextPack: contextPack.renderedMarkdown,
+            projectMessage: workspaceEntry.map {
+                $0.routedText ?? $0.text
+            },
+            additionalInstructions:
+                promptPreferences.codexAdditionalInstructions
+        )
         let provisionalBinding = RuntimeSessionBinding(
             id: bindingID,
             taskID: task.id,
@@ -1530,6 +1548,8 @@ public final class ControlPlaneService: @unchecked Sendable {
                 agent: agent,
                 contextPack: contextPack,
                 promptOverride: initialPrompt,
+                additionalInstructions:
+                    promptPreferences.codexAdditionalInstructions,
                 clientUserMessageID: initialRun.id.uuidString,
                 onThreadStarted: { [store] threadID in
                     guard var stagedRun = try store.fetchRun(id: runID) else {

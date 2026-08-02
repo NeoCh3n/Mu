@@ -1,24 +1,63 @@
 # Mu
 
-### A local-first control plane for real agent work
+**面向人类与 AI Agent 的项目协作操作系统。**
 
-Mu gives developers one durable Project workspace for work that may move between
-Codex, Claude Code, OpenWorker, and future Agent hosts. It keeps the Project's
-truth, permissions, Context Packs, evidence, and history under Mu's control
-while each vendor Runtime keeps its own native state.
+Mu 是一套开放架构，用于让人类、编程 Agent、研究 Agent 以及用户自带的 Agent 在同一个项目中协作。
 
-Mu is built for the moment when a task outgrows one chat window:
+Mu 不把 Agent 当作彼此隔离的聊天会话，而是为每个参与者提供明确的身份、任务范围、权限边界、独立工作区和审计记录。项目知识不依赖任何单一模型或 Runtime，使不同 Agent 能够在不共享私有记忆、不互相覆盖上下文的情况下协同工作。
 
-- **Route work explicitly.** Mention **@Codex**, **@Claude**, **@OpenWorker**, or a
-  named Agent and Mu sends one bounded Project message to the verified endpoint.
-- **Keep context portable.** Import local history as reviewable Raw Sources,
-  select what becomes accepted Context, and deliver a fresh, bounded Context
-  Pack to the next Runtime.
-- **Make identity visible.** Codex Desktop, Codex CLI, Claude Code terminals,
-  and other endpoints remain distinct through persisted instance identity.
-- **Keep humans in control.** Local state is durable and auditable; read-only
-  defaults, exact-workspace checks, leases, approvals, and evidence receipts
-  make the integration boundary explicit.
+Mu 计划通过统一的 Runtime Adapter 接入 Codex、Claude Code、CodeBuddy、OpenWorker 及外部托管 Agent，同时通过 MCP 为不同 Runtime 提供共享的工具、文件、代码仓库和外部系统访问能力。
+
+## Mu 正在构建什么
+
+- 以 Project 为中心的人类与 Agent 协作
+- 支持用户自带 Agent，包括外部托管 Agent
+- 面向不同 Agent Runtime 的统一适配层
+- 可追溯、可版本化的任务级 Context Pack
+- 支持多个 Agent 并行执行的隔离工作区
+- 明确的权限、委派、审查与审批机制
+- 能识别冲突的项目记忆，而不是一个共享 Prompt
+- 可重建的执行记录，能够确认 Agent 当时获得了哪些上下文
+- 供不同 Runtime 共用的 MCP 工具与集成层
+
+## 核心原则
+
+```text
+Project State 由 Mu 管理。
+Runtime State 由各 Agent Runtime 管理。
+工具与外部系统通过 MCP 接入。
+```
+
+Mu 不是另一个 Agent Wrapper，也不是多模型聊天界面。
+
+它面向以下协作场景：
+
+- 一个人同时使用多个 Agent
+- 多个人分别带自己的 Agent 加入项目
+- 有人加入项目，但不带 Agent
+- 某个组织只派 Agent 加入，人不直接参与
+- Agent 通过任务和 Artifact 进行工作交接
+- 项目决策可以跨模型、跨 Runtime 完整追溯
+
+## 架构
+
+```text
+人类与 Agent 参与者
+          │
+    Mu Project Control Plane
+          │
+任务 · 上下文 · 权限
+产物 · 审查 · 事件
+          │
+     Runtime Adapters
+          │
+Codex · Claude Code · CodeBuddy
+OpenWorker · External Agents
+          │
+        MCP Tools
+```
+
+Mu 希望让人类与 Agent 的协作，像现代软件开发一样结构化、可检查、可追溯、可迁移。
 
 ## Current verified scope
 

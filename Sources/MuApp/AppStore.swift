@@ -198,6 +198,26 @@ final class AppStore: ObservableObject {
         }
     }
 
+    @Published var codexPromptInstructions: String =
+        RuntimePromptPreferences.load().codexAdditionalInstructions {
+        didSet {
+            codexPromptInstructions = normalizedPromptInstructions(
+                codexPromptInstructions
+            )
+            persistRuntimePromptPreferences()
+        }
+    }
+
+    @Published var claudeCodePromptInstructions: String =
+        RuntimePromptPreferences.load().claudeCodeAdditionalInstructions {
+        didSet {
+            claudeCodePromptInstructions = normalizedPromptInstructions(
+                claudeCodePromptInstructions
+            )
+            persistRuntimePromptPreferences()
+        }
+    }
+
     @Published var section: AppSection = .overview
     @Published var tasks: [TaskRecord] = []
     @Published var projectPreferences: [ProjectPreference] = []
@@ -318,6 +338,10 @@ final class AppStore: ObservableObject {
     init(service: ControlPlaneService? = nil) {
         do {
             self.service = try service ?? ControlPlaneService()
+            self.service?.runtimePromptPreferences = RuntimePromptPreferences(
+                codexAdditionalInstructions: codexPromptInstructions,
+                claudeCodeAdditionalInstructions: claudeCodePromptInstructions
+            )
             reload()
             if let service = self.service {
                 // Keep Codex app-server startup off the UI thread and out of
@@ -332,6 +356,22 @@ final class AppStore: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func persistRuntimePromptPreferences() {
+        let preferences = RuntimePromptPreferences(
+            codexAdditionalInstructions: codexPromptInstructions,
+            claudeCodeAdditionalInstructions: claudeCodePromptInstructions
+        )
+        preferences.save()
+        service?.runtimePromptPreferences = preferences
+    }
+
+    private func normalizedPromptInstructions(_ value: String) -> String {
+        String(
+            value.trimmingCharacters(in: .whitespacesAndNewlines)
+                .prefix(RuntimePromptPreferences.maxAdditionalInstructionCharacters)
+        )
     }
 
     func showCompletionToast(_ message: String, taskID: UUID) {
