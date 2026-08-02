@@ -813,7 +813,9 @@ public final class ControlPlaneService: @unchecked Sendable {
                 RuntimeIdentityConfigurationKey.instanceLabel:
                     normalizedInstanceLabel.isEmpty
                     ? name
-                    : normalizedInstanceLabel
+                    : normalizedInstanceLabel,
+                RuntimeIdentityConfigurationKey.nativeSource:
+                    "user_configured"
             ]
         if let path, !path.isEmpty {
             nativeConfiguration["executable"] = path

@@ -100,9 +100,12 @@ export function registerProjectsRoutes(app: FastifyInstance, ctx: RouteContext):
       displayName: body.displayName ?? body.runtimeTypeID,
       runtimeVersion: body.runtimeVersion ?? 'unknown',
       location: (body.location as 'local') ?? 'local',
-      nativeConfiguration: body.executablePath === undefined || body.executablePath.trim() === ''
-        ? undefined
-        : { executable: body.executablePath.trim() },
+      nativeConfiguration: {
+        'identity.native_source': 'user_configured',
+        ...(body.executablePath === undefined || body.executablePath.trim() === ''
+          ? {}
+          : { executable: body.executablePath.trim() }),
+      },
       instanceIdentity: {
         ...(body.surfaceKind === undefined ? {} : { surfaceKind: body.surfaceKind as never }),
         ...(body.instanceLabel === undefined ? {} : { instanceLabel: body.instanceLabel.trim() }),

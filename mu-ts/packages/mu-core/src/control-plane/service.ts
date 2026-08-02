@@ -88,6 +88,7 @@ import type { ProjectContextPackRecord } from '../project-kernel/index.ts'
 import {
   createRuntimeAdapterRegistration,
 } from '../runtime-gateway/manifest.ts'
+import { resolvedInstanceIdentity } from '../runtime-gateway/identity.ts'
 import {
   buildProjectContextPack,
   createDeliveryReceipt,
@@ -171,7 +172,7 @@ export interface ControlPlaneService {
     displayName: string
     runtimeVersion: string
     location: RuntimeEndpoint['location']
-    /** Explicit instance identity; defaults are derived from the runtime type. */
+    /** Explicit instance identity; only local evidence can create a persisted default. */
     instanceIdentity?: Partial<AgentRuntimeInstanceIdentity>
     /** Optional user-supplied local configuration, kept opaque to the core. */
     nativeConfiguration?: Readonly<Record<string, string>>
@@ -337,26 +338,21 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
   }
 
   function providerFor(endpoint: RuntimeEndpoint): { rawValue: string } {
-    // Prefer the concrete instance identity (bootstrap sets
-    // provider: codex / claude_code); nativeConfiguration is the fallback.
-    return {
-      rawValue: endpoint.instanceIdentity?.provider.rawValue
-        ?? endpoint.nativeConfiguration?.['provider']
-        ?? 'claude_code',
-    }
+    // Prefer the concrete instance identity (bootstrap sets provider:
+    // codex / claude_code). The resolver is only used for the gateway
+    // manifest; it does not make an unconfigured endpoint visible in the UI.
+    return resolvedInstanceIdentity(endpoint).provider
   }
 
   function endpointScope(endpoint: RuntimeEndpoint): AgentRuntimeEndpointScope {
-    if (endpoint.instanceIdentity === undefined) {
-      throw MuError.invalidTransition(
-        `Endpoint ${endpoint.id} has no instance identity and cannot be used by a host.`,
-      )
-    }
     return {
       endpointID: endpoint.id,
       runtimeTypeID: endpoint.runtimeTypeID,
       displayName: endpoint.displayName,
-      instanceIdentity: endpoint.instanceIdentity,
+      // A manually registered test/managed endpoint may not carry local
+      // evidence yet. Host operations still receive a stable, endpoint-scoped
+      // identity without making that endpoint look configured to users.
+      instanceIdentity: resolvedInstanceIdentity(endpoint),
     }
   }
 
@@ -473,7 +469,10 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
         guaranteeNote: 'Registered by the control plane.',
         lastProbedAt: now(),
         nativeConfiguration: params.nativeConfiguration,
-        instanceIdentity: defaultInstanceIdentity(params, endpointID),
+        instanceIdentity: defaultInstanceIdentity({
+          ...params,
+          nativeConfiguration: params.nativeConfiguration,
+        }, endpointID),
       })
       upsertEndpoint(store, endpoint)
       const registration = createRuntimeAdapterRegistration({
@@ -493,7 +492,7 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
             { operation: 'interrupt', support: host.capabilities.supportsInterrupt ? 'supported' : 'unsupported' },
             { operation: 'artifact.list', support: host.capabilities.supportsArtifacts ? 'supported' : 'unsupported' },
           ],
-          instanceIdentity: endpoint.instanceIdentity!,
+          instanceIdentity: resolvedInstanceIdentity(endpoint),
           notes: [],
         },
         probedAt: now(),
@@ -1547,9 +1546,23 @@ function defaultInstanceIdentity(
     displayName: string
     location: RuntimeEndpoint['location']
     instanceIdentity?: Partial<AgentRuntimeInstanceIdentity>
+    nativeConfiguration?: Readonly<Record<string, string>>
   },
   endpointID: UUID,
-): AgentRuntimeInstanceIdentity {
+): AgentRuntimeInstanceIdentity | undefined {
+  const explicitIdentity = Object.values(params.instanceIdentity ?? {}).some((value) => {
+    return typeof value === 'string' ? value.trim() !== '' : value !== undefined
+  })
+  const nativeEvidence = Object.entries(params.nativeConfiguration ?? {}).some(([key, value]) => {
+    if (typeof value !== 'string' || value.trim() === '') return false
+    return key === 'executable'
+      || key === 'application_path'
+      || key === 'bundle_identifier'
+      || key === 'terminal_id'
+      || key === 'tty'
+      || key.startsWith('identity.')
+  })
+  if (!explicitIdentity && !nativeEvidence) return undefined
   const base: AgentRuntimeInstanceIdentity = {
     provider: providerForRuntimeTypeID(params.runtimeTypeID),
     surfaceKind: params.location === 'local' ? 'terminal_cli' : 'remote_service',

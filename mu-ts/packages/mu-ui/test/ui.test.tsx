@@ -79,6 +79,17 @@ describe('Mu UI', () => {
     )
     expect(await screen.findByText('Runtime endpoints')).toBeTruthy()
     expect(await screen.findByText(/No useful runtime endpoints yet/)).toBeTruthy()
+    expect(screen.queryByText('Optional aliases')).toBeNull()
+  })
+
+  it('uses the Agents surface as the single runtime registry entry point', async () => {
+    render(
+      <MemoryRouter initialEntries={['/endpoints']}>
+        <App />
+      </MemoryRouter>,
+    )
+    expect(await screen.findByText('Runtime endpoints')).toBeTruthy()
+    expect(screen.queryByText('How discovery works')).toBeNull()
   })
 
   it('shows project and participating-agent summaries on Overview', async () => {

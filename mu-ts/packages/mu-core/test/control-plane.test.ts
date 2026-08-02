@@ -16,7 +16,7 @@ import { fetchLedger } from '../src/control-plane/ledger.ts'
 import { MuError } from '../src/errors.ts'
 import type { Harness, HarnessTurnEvent } from '../src/harness/types.ts'
 import { uuid, type UUID } from '../src/identity.ts'
-import { createRuntimeEndpoint } from '../src/models.ts'
+import { createRuntimeEndpoint, isUsefulRuntimeEndpoint } from '../src/models.ts'
 import { upsertEndpoint } from '../src/persistence/domain.ts'
 import { SQLiteStore } from '../src/persistence/store.ts'
 
@@ -182,6 +182,8 @@ describe('ControlPlaneService', () => {
       expect(service.listTasks()).toHaveLength(1)
       expect(service.fetchTask(task.id)?.status).toBe('ready')
       expect(endpoint.status).toBe('discovered')
+      expect(endpoint.instanceIdentity).toBeUndefined()
+      expect(isUsefulRuntimeEndpoint(endpoint)).toBe(false)
 
       const ledger = service.fetchLedger()
       expect(ledger.map((e) => e.type)).toEqual(

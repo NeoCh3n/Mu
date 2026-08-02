@@ -7,11 +7,7 @@ struct RuntimesView: View {
     @State private var showingOtherDiscovered = false
 
     private var primaryEndpoints: [RuntimeEndpoint] {
-        let useful = visibleRuntimeEndpoints.filter { endpoint in
-            endpoint.status != .discovered
-                || endpoint.instanceIdentity != nil
-                || endpoint.nativeConfiguration != nil
-        }
+        let useful = visibleRuntimeEndpoints.filter(hasRuntimeEvidence)
         return deduplicatedEndpoints(useful)
     }
 
@@ -173,47 +169,8 @@ struct RuntimesView: View {
                     .tint(.secondary)
                 }
 
-                Panel(title: "How Mu decides what to show", subtitle: "A simple discovery rule") {
-                    VStack(alignment: .leading, spacing: 12) {
-                        contractRow(
-                            symbol: "magnifyingglass",
-                            color: MuPalette.mint,
-                            title: "Found",
-                            message: "A local executable or desktop bundle exists, so Mu records a discovery."
-                        )
-                        contractRow(
-                            symbol: "checkmark.seal",
-                            color: MuPalette.violet,
-                            title: "Useful",
-                            message: "A stable instance identity or a successful probe makes it ready to use."
-                        )
-                        contractRow(
-                            symbol: "arrow.triangle.2.circlepath",
-                            color: MuPalette.coral,
-                            title: "Duplicate",
-                            message: "Unverified copies with the same runtime name are grouped; cleanup keeps the newest one."
-                        )
-                    }
-                }
             }
             .padding(embedded ? 0 : 28)
-    }
-
-    private func contractRow(
-        symbol: String,
-        color: Color,
-        title: String,
-        message: String
-    ) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: symbol)
-                .foregroundStyle(color)
-                .frame(width: 28)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.subheadline.weight(.semibold))
-                Text(message).font(.caption).foregroundStyle(.secondary)
-            }
-        }
     }
 }
 
@@ -337,20 +294,20 @@ private struct RuntimeCard: View {
     private var runtimePurpose: String {
         let type = endpoint.runtimeTypeID.lowercased()
         if type.contains("codex") {
-            return "Codex is available locally; check once to verify the account."
+            return "Configure Codex and check it before starting a Task."
         }
         if type.contains("claude") {
-            return "Claude Code was found locally; check once to verify the terminal."
+            return "Configure a Claude Code terminal and check it before starting a Task."
         }
         if type.contains("openworker") {
-            return "OpenWorker was found locally; check once to connect its desktop session."
+            return "Native compatibility runtime; configure it before starting a Task."
         }
         if endpoint.provenance == .artifactOnly {
             return "Evidence-only source; it can contribute files but cannot run a Task."
         }
         return endpoint.status == .active
             ? "Verified local Runtime ready for Tasks."
-            : "A Runtime candidate found on this Mac."
+            : "A Runtime candidate needs setup before it can run a Task."
     }
 
     private var runtimeActionHint: String {
@@ -358,7 +315,9 @@ private struct RuntimeCard: View {
             return "Ready for a Task. Mu will use this endpoint when you choose it."
         }
         if endpoint.status == .discovered {
-            return "Found but not checked yet. Probe it before routing work."
+            return hasRuntimeEvidence(endpoint)
+                ? "Found but not checked yet. Probe it before routing work."
+                : "No concrete evidence is recorded yet. Configure or remove this record."
         }
         return "Not ready for work yet. Check the Runtime or remove it."
     }
@@ -366,7 +325,7 @@ private struct RuntimeCard: View {
     private var friendlyStatus: String {
         switch endpoint.status {
         case .active: "Ready"
-        case .discovered: "Found"
+        case .discovered: hasRuntimeEvidence(endpoint) ? "Found" : "Unverified"
         case .probing: "Checking"
         case .offline, .degraded, .quarantined: "Needs setup"
         }
@@ -407,12 +366,35 @@ private struct RuntimeCard: View {
     private var statusColor: Color {
         switch endpoint.status {
         case .active: MuPalette.mint
-        case .discovered, .probing: MuPalette.coral
+        case .discovered: hasRuntimeEvidence(endpoint) ? MuPalette.coral : .secondary
+        case .probing: MuPalette.coral
         case .degraded, .quarantined: .red
         case .offline: .secondary
         }
     }
 
+}
+
+private func hasRuntimeEvidence(_ endpoint: RuntimeEndpoint) -> Bool {
+    if endpoint.status != .discovered { return true }
+    let configuration = endpoint.nativeConfiguration ?? [:]
+    if ["executable", "application_path", "bundle_identifier", "terminal_id", "tty"].contains(where: { key in
+        guard let value = configuration[key] else { return false }
+        return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }) { return true }
+    if configuration.contains(where: { key, value in
+        key.hasPrefix("identity.") && !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }) { return true }
+    guard let identity = endpoint.instanceIdentity else { return false }
+    if identity.identityBasis != .installation { return true }
+    if identity.executablePath != nil
+        || identity.terminalIdentifier != nil
+        || identity.nativeSource != nil
+        || identity.workspacePath != nil
+        || identity.surfaceKind == .desktopApplication {
+        return true
+    }
+    return identity.stableInstanceKey != "\(endpoint.runtimeTypeID):\(endpoint.id)"
 }
 
 private struct FlowLayout: Layout {

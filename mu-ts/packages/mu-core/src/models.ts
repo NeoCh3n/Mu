@@ -531,11 +531,45 @@ export function runtimeEndpointIdentityKey(endpoint: RuntimeEndpoint): string {
   return `unidentified:${endpoint.runtimeTypeID}:${endpoint.displayName.trim().toLowerCase()}`
 }
 
+/**
+ * A runtime is useful once it is verified or carries concrete local evidence.
+ * The control plane may still derive an endpoint-scoped fallback identity for
+ * host calls, but that synthetic identity must not make a blank discovery look
+ * configured in the registry UI.
+ */
+export function hasRuntimeEndpointEvidence(endpoint: RuntimeEndpoint): boolean {
+  if (endpoint.status !== 'discovered') return true
+
+  const configuration = endpoint.nativeConfiguration ?? {}
+  const configuredValue = (key: string): boolean => {
+    const value = configuration[key]
+    return typeof value === 'string' && value.trim() !== ''
+  }
+  if (
+    configuredValue('executable')
+    || configuredValue('application_path')
+    || configuredValue('bundle_identifier')
+    || configuredValue('terminal_id')
+    || configuredValue('tty')
+    || Object.keys(configuration).some((key) => key.startsWith('identity.') && configuredValue(key))
+  ) return true
+
+  const identity = endpoint.instanceIdentity
+  if (identity === undefined) return false
+  if (identity.identityBasis !== 'installation') return true
+  if (
+    identity.executablePath !== undefined
+    || identity.terminalIdentifier !== undefined
+    || identity.nativeSource !== undefined
+    || identity.workspacePath !== undefined
+    || identity.surfaceKind === 'desktop_application'
+  ) return true
+  return identity.stableInstanceKey !== `${endpoint.runtimeTypeID}:${endpoint.id}`
+}
+
 /** A runtime is useful once it is verified or has enough local identity to configure. */
 export function isUsefulRuntimeEndpoint(endpoint: RuntimeEndpoint): boolean {
-  return endpoint.status !== 'discovered'
-    || endpoint.instanceIdentity !== undefined
-    || endpoint.nativeConfiguration !== undefined
+  return hasRuntimeEndpointEvidence(endpoint)
 }
 
 /**

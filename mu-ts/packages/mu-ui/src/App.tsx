@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { NavLink, Route, Routes } from 'react-router'
+import { Navigate, NavLink, Route, Routes } from 'react-router'
 import { OverviewPage } from './pages/OverviewPage.tsx'
 import { ProjectsPage } from './pages/ProjectsPage.tsx'
 import { AgentsPage } from './pages/AgentsPage.tsx'
-import { EndpointsPage } from './pages/EndpointsPage.tsx'
 import { TasksPage } from './pages/TasksPage.tsx'
 import { TaskDetailPage } from './pages/TaskDetailPage.tsx'
 import { HandoffsPage } from './pages/HandoffsPage.tsx'
@@ -101,7 +100,8 @@ export default function App() {
             <Route path="/overview" element={<OverviewPage />} />
             <Route path="/projects" element={<ProjectsPage />} />
             <Route path="/agents" element={<AgentsPage />} />
-            <Route path="/endpoints" element={<EndpointsPage />} />
+            {/* Runtime setup and registry intentionally share one surface. */}
+            <Route path="/endpoints" element={<Navigate to="/agents" replace />} />
             <Route path="/tasks" element={<TasksPage />} />
             <Route path="/tasks/:id" element={<TaskDetailPage />} />
             <Route path="/handoffs" element={<HandoffsPage />} />
