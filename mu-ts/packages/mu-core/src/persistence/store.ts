@@ -5,6 +5,7 @@ import { MuError } from '../errors.ts'
 import { encodeMuJSON, formatIso8601Date } from '../hashing.ts'
 import type { UUID } from '../identity.ts'
 import type { LedgerEvent } from '../models.ts'
+import type { PresenceSessionRecord, SpaceEventRecord } from '../collaboration.ts'
 
 /**
  * SQLite persistence layer, schema-compatible with the Swift SQLiteStore.
@@ -71,6 +72,35 @@ export class SQLiteStore {
         ON records(kind, sort_at DESC);
       CREATE INDEX IF NOT EXISTS records_task
         ON records(task_id, kind, sort_at DESC);
+
+      CREATE TABLE IF NOT EXISTS collaboration_space_events (
+        space_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        event_id TEXT PRIMARY KEY,
+        thread_id TEXT,
+        actor_id TEXT NOT NULL,
+        client_instance_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        occurred_at TEXT NOT NULL,
+        json TEXT NOT NULL,
+        UNIQUE(space_id, sequence),
+        UNIQUE(space_id, idempotency_key)
+      );
+      CREATE INDEX IF NOT EXISTS collaboration_space_events_stream
+        ON collaboration_space_events(space_id, sequence ASC);
+
+      CREATE TABLE IF NOT EXISTS collaboration_presence (
+        id TEXT PRIMARY KEY,
+        space_id TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        client_instance_id TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        json TEXT NOT NULL,
+        UNIQUE(space_id, actor_id, client_instance_id)
+      );
+      CREATE INDEX IF NOT EXISTS collaboration_presence_space
+        ON collaboration_presence(space_id, expires_at DESC);
 
       CREATE TABLE IF NOT EXISTS ledger (
         sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -433,6 +463,121 @@ export class SQLiteStore {
 
   deleteRecord(kind: string, id: UUID): void {
     this.db.prepare('DELETE FROM records WHERE kind = ? AND id = ?;').run(kind, id)
+  }
+
+  // -------------------------------------------------------------------------
+  // Shared Space transport projections
+  // -------------------------------------------------------------------------
+
+  nextSpaceEventSequence(spaceID: UUID): number {
+    const row = this.db
+      .prepare('SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM collaboration_space_events WHERE space_id = ?;')
+      .get(spaceID) as { next: number }
+    return row.next
+  }
+
+  latestSpaceEventSequence(spaceID: UUID): number {
+    const row = this.db
+      .prepare('SELECT COALESCE(MAX(sequence), 0) AS latest FROM collaboration_space_events WHERE space_id = ?;')
+      .get(spaceID) as { latest: number }
+    return row.latest
+  }
+
+  insertSpaceEvent(event: SpaceEventRecord): void {
+    this.db
+      .prepare(
+        `INSERT INTO collaboration_space_events(
+           space_id, sequence, event_id, thread_id, actor_id,
+           client_instance_id, idempotency_key, occurred_at, json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+      )
+      .run(
+        event.spaceID,
+        event.sequence,
+        event.id,
+        event.threadID ?? null,
+        event.actorID,
+        event.clientInstanceID,
+        event.idempotencyKey,
+        dateString(event.occurredAt),
+        this.encode(event),
+      )
+  }
+
+  fetchSpaceEventByIdempotency(spaceID: UUID, idempotencyKey: string): SpaceEventRecord | undefined {
+    const row = this.db
+      .prepare('SELECT json FROM collaboration_space_events WHERE space_id = ? AND idempotency_key = ?;')
+      .get(spaceID, idempotencyKey) as { json: string } | undefined
+    return row === undefined ? undefined : decodeMuJSON<SpaceEventRecord>(row.json)
+  }
+
+  fetchSpaceEvents(spaceID: UUID, afterSequence = 0, limit = 100): SpaceEventRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT json FROM collaboration_space_events
+         WHERE space_id = ? AND sequence > ?
+         ORDER BY sequence ASC LIMIT ?;`,
+      )
+      .all(spaceID, afterSequence, limit) as Array<{ json: string }>
+    return rows.map((row) => decodeMuJSON<SpaceEventRecord>(row.json))
+  }
+
+  upsertPresenceSession(presence: PresenceSessionRecord): void {
+    this.db
+      .prepare(
+        `INSERT INTO collaboration_presence(
+           id, space_id, actor_id, client_instance_id,
+           last_seen_at, expires_at, json
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(space_id, actor_id, client_instance_id) DO UPDATE SET
+           id = excluded.id,
+           last_seen_at = excluded.last_seen_at,
+           expires_at = excluded.expires_at,
+           json = excluded.json;`,
+      )
+      .run(
+        presence.id,
+        presence.spaceID,
+        presence.actorID,
+        presence.clientInstanceID,
+        dateString(presence.lastSeenAt),
+        dateString(presence.expiresAt),
+        this.encode(presence),
+      )
+  }
+
+  fetchPresenceSession(
+    spaceID: UUID,
+    actorID: UUID,
+    clientInstanceID: string,
+  ): PresenceSessionRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT json FROM collaboration_presence
+         WHERE space_id = ? AND actor_id = ? AND client_instance_id = ?;`,
+      )
+      .get(spaceID, actorID, clientInstanceID) as { json: string } | undefined
+    return row === undefined ? undefined : decodeMuJSON<PresenceSessionRecord>(row.json)
+  }
+
+  fetchPresenceSessions(spaceID: UUID, now = new Date()): PresenceSessionRecord[] {
+    const rows = this.db
+      .prepare(
+        `SELECT json FROM collaboration_presence
+         WHERE space_id = ? AND expires_at > ?
+         ORDER BY last_seen_at DESC;`,
+      )
+      .all(spaceID, dateString(now)) as Array<{ json: string }>
+    return rows.map((row) => decodeMuJSON<PresenceSessionRecord>(row.json))
+  }
+
+  deletePresenceSession(spaceID: UUID, actorID: UUID, clientInstanceID: string): void {
+    this.db
+      .prepare(
+        `DELETE FROM collaboration_presence
+         WHERE space_id = ? AND actor_id = ? AND client_instance_id = ?;`,
+      )
+      .run(spaceID, actorID, clientInstanceID)
   }
 
   // -------------------------------------------------------------------------

@@ -1,8 +1,19 @@
-import { describe, expect, it } from 'vitest'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
 import type { AgentIdentity, ChatEntry, RuntimeEndpoint, TaskRecord } from '../src/models.ts'
 import type { ProjectContextPackRecord, ProjectRecord } from '../src/project-kernel/index.ts'
 import { SQLiteStore } from '../src/persistence/store.ts'
 import { fetchEndpoints } from '../src/persistence/domain.ts'
+
+const fixtureCopies: string[] = []
+
+afterEach(() => {
+  for (const directory of fixtureCopies.splice(0)) {
+    fs.rmSync(directory, { recursive: true, force: true })
+  }
+})
 
 /**
  * Cross-implementation compatibility: this database was WRITTEN by the Swift
@@ -10,9 +21,14 @@ import { fetchEndpoints } from '../src/persistence/domain.ts'
  * functions as MuCore). The TypeScript layer must decode it byte-compatibly.
  */
 function openSwiftFixture(): SQLiteStore {
+  const source = new URL('./fixtures/swift-synthetic.sqlite', import.meta.url).pathname
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mu-ts-swift-fixture-'))
+  const copy = path.join(directory, 'swift-synthetic.sqlite')
+  fs.copyFileSync(source, copy)
+  fixtureCopies.push(directory)
   return new SQLiteStore({
-    dataDirectory: '',
-    filename: new URL('./fixtures/swift-synthetic.sqlite', import.meta.url).pathname,
+    dataDirectory: directory,
+    filename: 'swift-synthetic.sqlite',
   })
 }
 

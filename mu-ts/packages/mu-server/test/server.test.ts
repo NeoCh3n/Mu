@@ -242,6 +242,124 @@ describe('Mu HTTP API', () => {
     }
   })
 
+  it('syncs ordered Space events, deduplicates retries, and isolates presence', async () => {
+    const { mu, cleanup } = makeApp()
+    try {
+      const { app } = mu
+      const actorA = '00000000-0000-4000-8000-0000000000a1'
+      const actorB = '00000000-0000-4000-8000-0000000000b2'
+      const spaceResponse = await app.inject({
+        method: 'POST',
+        url: '/spaces',
+        headers: {
+          'x-mu-actor-id': actorA,
+          'x-mu-client-instance-id': 'mac-a',
+          'x-mu-display-name': 'Alice',
+        },
+        payload: { displayName: 'Shared room' },
+      })
+      expect(spaceResponse.statusCode).toBe(200)
+      const spaceID = spaceResponse.json<{ space: { id: string } }>().space.id
+
+      const firstPayload = {
+        eventType: 'thread.created',
+        payload: { title: 'Investigate sync' },
+        idempotencyKey: 'thread-create-1',
+      }
+      const first = await app.inject({
+        method: 'POST',
+        url: `/spaces/${spaceID}/events`,
+        headers: {
+          'x-mu-actor-id': actorA,
+          'x-mu-client-instance-id': 'mac-a',
+          'x-mu-display-name': 'Alice',
+        },
+        payload: firstPayload,
+      })
+      expect(first.statusCode).toBe(201)
+      const firstEvent = first.json<{ event: { id: string; sequence: number }; deduplicated: boolean }>()
+      expect(firstEvent.deduplicated).toBe(false)
+      expect(firstEvent.event.sequence).toBe(1)
+
+      const retry = await app.inject({
+        method: 'POST',
+        url: `/spaces/${spaceID}/events`,
+        headers: {
+          'x-mu-actor-id': actorB,
+          'x-mu-client-instance-id': 'laptop-b',
+          'x-mu-display-name': 'Bob',
+        },
+        payload: firstPayload,
+      })
+      expect(retry.statusCode).toBe(200)
+      expect(retry.json<{ event: { id: string; sequence: number }; deduplicated: boolean }>().event.id)
+        .toBe(firstEvent.event.id)
+      expect(retry.json<{ deduplicated: boolean }>().deduplicated).toBe(true)
+
+      const second = await app.inject({
+        method: 'POST',
+        url: `/spaces/${spaceID}/events`,
+        headers: {
+          'x-mu-actor-id': actorB,
+          'x-mu-client-instance-id': 'laptop-b',
+          'x-mu-display-name': 'Bob',
+        },
+        payload: {
+          eventType: 'comment.added',
+          payload: { text: 'I can see the shared thread.' },
+          idempotencyKey: 'comment-1',
+        },
+      })
+      expect(second.statusCode).toBe(201)
+      expect(second.json<{ event: { sequence: number } }>().event.sequence).toBe(2)
+
+      const firstPage = await app.inject({
+        method: 'GET',
+        url: `/spaces/${spaceID}/sync?after=0&limit=1`,
+      })
+      expect(firstPage.statusCode).toBe(200)
+      expect(firstPage.json<{ events: Array<{ sequence: number }>; hasMore: boolean }>().events.map((event) => event.sequence))
+        .toEqual([1])
+      expect(firstPage.json<{ hasMore: boolean }>().hasMore).toBe(true)
+
+      const secondPage = await app.inject({
+        method: 'GET',
+        url: `/spaces/${spaceID}/sync?after=1&limit=100`,
+      })
+      expect(secondPage.json<{ events: Array<{ sequence: number }> }>().events.map((event) => event.sequence))
+        .toEqual([2])
+
+      await app.inject({
+        method: 'PUT',
+        url: `/spaces/${spaceID}/presence`,
+        headers: {
+          'x-mu-actor-id': actorA,
+          'x-mu-client-instance-id': 'mac-a',
+          'x-mu-display-name': 'Alice',
+        },
+        payload: { state: 'online' },
+      })
+      await app.inject({
+        method: 'PUT',
+        url: `/spaces/${spaceID}/presence`,
+        headers: {
+          'x-mu-actor-id': actorB,
+          'x-mu-client-instance-id': 'laptop-b',
+          'x-mu-display-name': 'Bob',
+        },
+        payload: { state: 'idle' },
+      })
+      const finalSync = await app.inject({
+        method: 'GET',
+        url: `/spaces/${spaceID}/sync?after=2`,
+      })
+      const presence = finalSync.json<{ presence: Array<{ displayName: string }> }>().presence
+      expect(presence.map((item) => item.displayName).sort()).toEqual(['Alice', 'Bob'])
+    } finally {
+      cleanup()
+    }
+  })
+
   it('streams SSE events on /api/events', async () => {
     const { mu, cleanup } = makeApp()
     try {

@@ -27,6 +27,8 @@ describe('SQLiteStore', () => {
       .all()
       .map((r) => (r as { name: string }).name)
     expect(tables).toEqual([
+      'collaboration_presence',
+      'collaboration_space_events',
       'context_access_policies',
       'context_conflict_records',
       'context_conflicts',
