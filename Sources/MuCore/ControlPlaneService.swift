@@ -1329,7 +1329,10 @@ public final class ControlPlaneService: @unchecked Sendable {
     }
 
     @discardableResult
-    public func dispatchCodexTask(runID: UUID) throws -> CodexTurnResult {
+    public func dispatchCodexTask(
+        runID: UUID,
+        workspaceEntryID: UUID? = nil
+    ) throws -> CodexTurnResult {
         guard var initialRun = try store.fetchRun(id: runID) else {
             throw MuError.recordNotFound("Run \(runID)")
         }
@@ -1355,6 +1358,20 @@ public final class ControlPlaneService: @unchecked Sendable {
         guard var task = try store.fetchTask(id: initialRun.taskID),
               task.currentRunID == initialRun.id else {
             throw MuError.invalidTransition("The Codex Run is not the Task's current Run.")
+        }
+        var workspaceEntry = try workspaceEntryID.flatMap {
+            try store.fetchChatEntry(id: $0)
+        }
+        if let workspaceEntry {
+            guard workspaceEntry.taskID == task.id,
+                  workspaceEntry.targetEndpointID == initialRun.endpointID,
+                  workspaceEntry.runID == initialRun.id,
+                  workspaceEntry.runtimeSessionBindingID == nil,
+                  workspaceEntry.deliveryState == .awaitingSession else {
+                throw MuError.invalidTransition(
+                    "The Codex Workspace message is not waiting for its initial session."
+                )
+            }
         }
         let agent = try initialRun.agentIdentityID.flatMap { try store.fetchAgent(id: $0) }
         try RuntimeGatewayRegistry.require(
@@ -1383,6 +1400,10 @@ public final class ControlPlaneService: @unchecked Sendable {
             taskLeaseID: lease.id
         )
         let initialPrompt = contextPack.renderedMarkdown
+            + (workspaceEntry.map {
+                "\n\n# Current Project message\n\n"
+                    + ($0.routedText ?? $0.text)
+            } ?? "")
         let provisionalBinding = RuntimeSessionBinding(
             id: bindingID,
             taskID: task.id,
@@ -1418,6 +1439,13 @@ public final class ControlPlaneService: @unchecked Sendable {
                 agent?.displayName ?? endpoint.displayName,
             text: "Starting Codex…"
         )
+        if var entry = workspaceEntry {
+            entry.runtimeSessionBindingID = bindingID
+            entry.nativeMessageIndexLowerBound = provisionalBinding.lastSyncedMessageCount
+            entry.deliveryState = .sending
+            entry.updatedAt = Date()
+            workspaceEntry = entry
+        }
         initialRun.projectID = kernel.project.id
         initialRun.workspaceID = kernel.workspace.id
         initialRun.actorID = actorID
@@ -1437,6 +1465,9 @@ public final class ControlPlaneService: @unchecked Sendable {
                 try store.upsertRuntimeSessionBinding(
                     provisionalBinding
                 )
+                if let workspaceEntry {
+                    try store.upsertChatEntry(workspaceEntry)
+                }
                 try store.insertChatEntry(responseEntry)
                 try store.appendEvent(
                     LedgerEvent(
@@ -1691,6 +1722,19 @@ public final class ControlPlaneService: @unchecked Sendable {
                         ? .failed
                         : .ambiguous
             chatEntry.updatedAt = now
+            var finalWorkspaceEntry: ChatEntry?
+            if var workspaceEntry = workspaceEntryID.flatMap({
+                try? store.fetchChatEntry(id: $0)
+            }) ?? workspaceEntry {
+                workspaceEntry.runtimeSessionBindingID = binding?.id
+                workspaceEntry.deliveryState = result.status == "completed"
+                    ? .delivered
+                    : result.status == "interrupted"
+                        ? .cancelled
+                        : .failed
+                workspaceEntry.updatedAt = now
+                finalWorkspaceEntry = workspaceEntry
+            }
             try store.withTransaction {
                 guard try store.fetchRegisteredEndpoint(id: endpoint.id) != nil else {
                     throw MuError.recordNotFound("Codex App Server endpoint")
@@ -1701,6 +1745,9 @@ public final class ControlPlaneService: @unchecked Sendable {
                     try store.upsertRuntimeSessionBinding(
                         binding
                     )
+                }
+                if let workspaceEntry = finalWorkspaceEntry {
+                    try store.upsertChatEntry(workspaceEntry)
                 }
                 try store.upsertChatEntry(chatEntry)
                 try store.appendEvent(
@@ -1773,6 +1820,17 @@ public final class ControlPlaneService: @unchecked Sendable {
                     entry.updatedAt = now
                     failedEntry = entry
                 }
+                var failedWorkspaceEntry: ChatEntry?
+                if var workspaceEntry = workspaceEntryID.flatMap({
+                    try? store.fetchChatEntry(id: $0)
+                }) ?? workspaceEntry {
+                    workspaceEntry.runtimeSessionBindingID = failedBinding?.id
+                    workspaceEntry.deliveryState = hasNativeIdentity
+                        ? .ambiguous
+                        : .failed
+                    workspaceEntry.updatedAt = now
+                    failedWorkspaceEntry = workspaceEntry
+                }
                 try? store.withTransaction {
                     try store.upsertRun(run)
                     try store.upsertTask(failedTask)
@@ -1785,6 +1843,9 @@ public final class ControlPlaneService: @unchecked Sendable {
                         try store.upsertChatEntry(
                             failedEntry
                         )
+                    }
+                    if let failedWorkspaceEntry {
+                        try store.upsertChatEntry(failedWorkspaceEntry)
                     }
                     try store.appendEvent(
                         LedgerEvent(
@@ -2178,7 +2239,7 @@ public final class ControlPlaneService: @unchecked Sendable {
         text: String,
         selectedEndpointID: UUID? = nil
     ) throws -> PreparedWorkspaceMessage {
-        guard let task = try store.fetchTask(id: taskID) else {
+        guard var task = try store.fetchTask(id: taskID) else {
             throw MuError.recordNotFound("Task \(taskID)")
         }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2247,16 +2308,19 @@ public final class ControlPlaneService: @unchecked Sendable {
         let isOpenWorker =
             endpoint.runtimeTypeID
             == Self.openWorkerRuntimeTypeID
+        let isManagedNativeRuntime =
+            endpoint.runtimeTypeID == Self.codexRuntimeTypeID
+                || endpoint.runtimeTypeID == Self.claudeCodeRuntimeTypeID
 
         let binding = try currentRuntimeSessionBinding(
             taskID: taskID,
             endpointID: endpoint.id,
             agentIdentityID: route.agentIdentityID
         )
-        if !isOpenWorker, binding == nil {
+        if !isOpenWorker, !isManagedNativeRuntime, binding == nil {
             throw MuError.invalidTransition(
                 "\(endpoint.displayName) has no resumable native session "
-                    + "for this Task. Complete its initial Project Run first."
+                    + "for this Task."
             )
         }
         if let binding,
@@ -2267,7 +2331,7 @@ public final class ControlPlaneService: @unchecked Sendable {
             )
         }
 
-        let link = try store.fetchTaskProjectLink(
+        var link = try store.fetchTaskProjectLink(
             taskID: taskID
         )
         let actorID =
@@ -2287,6 +2351,7 @@ public final class ControlPlaneService: @unchecked Sendable {
             actorID: routedActorID,
             endpointID: endpoint.id
         )
+        let isInitialManagedRun = isManagedNativeRuntime && binding == nil
         let run: RunRecord
         let shouldInsertRun: Bool
         if let binding {
@@ -2313,17 +2378,16 @@ public final class ControlPlaneService: @unchecked Sendable {
                 agentIdentityID: agent?.id
             )
             shouldInsertRun = true
-        } else if let binding,
-           let runID = binding.runID,
-           let existingRun = try store.fetchRun(id: runID),
-           existingRun.endpointID == endpoint.id,
-           existingRun.agentIdentityID == route.agentIdentityID {
-            run = existingRun
-            shouldInsertRun = false
-        } else if task.currentEndpointID == endpoint.id,
+        } else if isInitialManagedRun,
+                  task.currentEndpointID == endpoint.id,
                   let runID = task.currentRunID,
                   let currentRun = try store.fetchRun(id: runID),
-                  currentRun.agentIdentityID == route.agentIdentityID {
+                  currentRun.endpointID == endpoint.id,
+                  currentRun.agentIdentityID == route.agentIdentityID,
+                  currentRun.purpose == .execution,
+                  (currentRun.state == .starting || currentRun.state == .created),
+                  currentRun.nativeThreadID == nil,
+                  currentRun.nativeTurnID == nil {
             run = currentRun
             shouldInsertRun = false
         } else {
@@ -2334,11 +2398,38 @@ public final class ControlPlaneService: @unchecked Sendable {
                 taskID: taskID,
                 endpointID: endpoint.id,
                 actorName: agent?.displayName ?? endpoint.displayName,
-                purpose: .delegation,
+                purpose: isInitialManagedRun ? .execution : .delegation,
                 state: .starting,
                 agentIdentityID: agent?.id
             )
             shouldInsertRun = true
+        }
+
+        if isInitialManagedRun,
+           let currentRunID = task.currentRunID,
+           currentRunID != run.id,
+           let currentRun = try store.fetchRun(id: currentRunID),
+           currentRun.state == .starting || currentRun.state == .active {
+            throw MuError.invalidTransition(
+                "The current Runtime is still working. Wait for it to finish before switching Runtime."
+            )
+        }
+
+        // A Runtime selected in the composer is an explicit switch for this
+        // Task. Keep the Project Kernel's assigned actor in sync so the
+        // initial Run can be authorized and can build its Context Pack even
+        // when the Task was originally created on another Runtime.
+        if isInitialManagedRun {
+            if var taskLink = link {
+                taskLink.assignedToActorID = routedActorID
+                taskLink.updatedAt = Date()
+                link = taskLink
+            }
+            task.currentEndpointID = endpoint.id
+            task.currentRunID = run.id
+            task.assignedActorID = routedActorID
+            task.status = .running
+            task.updatedAt = Date()
         }
 
         let entry = ChatEntry(
@@ -2362,6 +2453,12 @@ public final class ControlPlaneService: @unchecked Sendable {
             if shouldInsertRun {
                 try store.upsertRun(run)
             }
+            if isInitialManagedRun {
+                try store.upsertTask(task)
+                if let link {
+                    try store.upsertTaskProjectLink(link)
+                }
+            }
             try store.insertChatEntry(entry)
             try store.appendEvent(
                 LedgerEvent(
@@ -2379,7 +2476,9 @@ public final class ControlPlaneService: @unchecked Sendable {
                         ? "runtime.message.awaiting_session"
                         : "runtime.message.queued",
                     summary: binding == nil
-                        ? "Workspace message is waiting for an explicit OpenWorker session link."
+                        ? (isInitialManagedRun
+                            ? "Workspace message is starting a native Runtime session."
+                            : "Workspace message is waiting for an explicit OpenWorker session link.")
                         : "Queued a bounded Workspace message for "
                             + "\(endpoint.displayName) session "
                             + "\(binding!.nativeSessionID).",
@@ -4421,7 +4520,7 @@ public final class ControlPlaneService: @unchecked Sendable {
         return try OpenWorkerClientConfiguration(baseURL: baseURL)
     }
 
-    private func currentRuntimeSessionBinding(
+    func currentRuntimeSessionBinding(
         taskID: UUID,
         endpointID: UUID,
         agentIdentityID: UUID?
@@ -4430,6 +4529,8 @@ public final class ControlPlaneService: @unchecked Sendable {
             .filter {
                 $0.endpointID == endpointID
                     && $0.state != .detached
+                    && $0.state != .failed
+                    && $0.state != .disconnected
             }
             .sorted { $0.updatedAt > $1.updatedAt }
         if let agentIdentityID {
