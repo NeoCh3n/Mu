@@ -2,7 +2,7 @@ import AppKit
 import MuCore
 import SwiftUI
 
-struct NewTaskSheet: View {
+struct NewThreadSheet: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
     @State private var draft = CreateTaskDraft()
@@ -35,11 +35,11 @@ struct NewTaskSheet: View {
         VStack(spacing: 0) {
             sheetHeader(
                 title: isAddingTaskToExistingProject
-                    ? "New Task in \(existingProjectName ?? "Project")"
+                    ? "New Thread in \(existingProjectName ?? "Project")"
                     : "Import folder as a Project",
                 subtitle: isAddingTaskToExistingProject
-                    ? "Start another Task in this Project workspace."
-                    : "Choose a Project folder and create its first Task.",
+                    ? "Start another Thread in this Project workspace."
+                    : "Choose a Project folder and create its first Thread.",
                 symbol: isAddingTaskToExistingProject
                     ? "plus.bubble"
                     : "folder.badge.plus"
@@ -88,7 +88,7 @@ struct NewTaskSheet: View {
 
                             Label(
                                 isAddingTaskToExistingProject
-                                    ? "This Task shares the Project folder, files, and related Agent history."
+                                    ? "This Thread shares the Project folder, files, and related Agent history."
                                     : "This exact folder becomes the Project and is used to match history and native sessions.",
                                 systemImage: "scope"
                             )
@@ -127,10 +127,10 @@ struct NewTaskSheet: View {
 
                     fieldGroup(
                         isAddingTaskToExistingProject
-                            ? "TASK"
-                            : "FIRST TASK"
+                            ? "THREAD"
+                            : "FIRST THREAD"
                     ) {
-                        TextField("Task title", text: $draft.title)
+                        TextField("Thread title", text: $draft.title)
                             .textFieldStyle(.roundedBorder)
                     }
                     fieldGroup("OBJECTIVE") {
@@ -280,17 +280,17 @@ struct NewTaskSheet: View {
     private var createButtonTitle: String {
         if isAddingTaskToExistingProject {
             return selectedHistoryProviders.isEmpty
-                ? "Create Task"
-                : "Create Task & find history"
+                ? "Create Thread"
+                : "Create Thread & find history"
         }
         return selectedHistoryProviders.isEmpty
-            ? "Create Project & Task"
+            ? "Create Project & Thread"
             : "Create & find history"
     }
 
     private func chooseTaskFolder() {
         let panel = NSOpenPanel()
-        panel.title = "Choose the Project folder"
+        panel.title = "Choose the Project folder for this Thread"
         panel.prompt = "Import folder"
         panel.canChooseDirectories = true
         panel.canChooseFiles = false

@@ -713,6 +713,427 @@ public final class SQLiteStore {
         )
     }
 
+    // MARK: - Collaboration surface records
+
+    public func fetchCollaborationSpaces() throws -> [CollaborationSpaceRecord] {
+        try fetchRecords(
+            kind: "collaboration_space",
+            as: CollaborationSpaceRecord.self
+        )
+    }
+
+    public func fetchCollaborationSpace(
+        id: UUID
+    ) throws -> CollaborationSpaceRecord? {
+        try fetchRecord(
+            kind: "collaboration_space",
+            id: id,
+            as: CollaborationSpaceRecord.self
+        )
+    }
+
+    public func upsertCollaborationSpace(
+        _ space: CollaborationSpaceRecord
+    ) throws {
+        try upsertRecord(
+            kind: "collaboration_space",
+            id: space.id,
+            taskID: nil,
+            sortAt: space.updatedAt,
+            value: space
+        )
+    }
+
+    public func fetchSpaceThreads(
+        spaceID: UUID? = nil
+    ) throws -> [SpaceThreadRecord] {
+        let threads = try fetchRecords(
+            kind: "space_thread",
+            as: SpaceThreadRecord.self
+        )
+        guard let spaceID else { return threads }
+        return threads.filter { $0.spaceID == spaceID }
+    }
+
+    public func fetchSpaceThread(
+        id: UUID
+    ) throws -> SpaceThreadRecord? {
+        try fetchRecord(
+            kind: "space_thread",
+            id: id,
+            as: SpaceThreadRecord.self
+        )
+    }
+
+    public func upsertSpaceThread(
+        _ thread: SpaceThreadRecord
+    ) throws {
+        try upsertRecord(
+            kind: "space_thread",
+            id: thread.id,
+            taskID: nil,
+            sortAt: thread.updatedAt,
+            value: thread
+        )
+    }
+
+    public func fetchSpaceProjectLinks(
+        spaceID: UUID? = nil,
+        projectID: UUID? = nil
+    ) throws -> [SpaceProjectLinkRecord] {
+        let links = try fetchRecords(
+            kind: "space_project_link",
+            as: SpaceProjectLinkRecord.self
+        )
+        return links.filter { link in
+            (spaceID == nil || link.spaceID == spaceID)
+                && (projectID == nil || link.projectID == projectID)
+        }
+    }
+
+    public func fetchSpaceProjectLink(
+        id: UUID
+    ) throws -> SpaceProjectLinkRecord? {
+        try fetchRecord(
+            kind: "space_project_link",
+            id: id,
+            as: SpaceProjectLinkRecord.self
+        )
+    }
+
+    public func upsertSpaceProjectLink(
+        _ link: SpaceProjectLinkRecord
+    ) throws {
+        try upsertRecord(
+            kind: "space_project_link",
+            id: link.id,
+            taskID: nil,
+            sortAt: link.updatedAt,
+            value: link
+        )
+    }
+
+    public func fetchWorkItems(
+        spaceID: UUID? = nil,
+        threadID: UUID? = nil,
+        projectID: UUID? = nil
+    ) throws -> [WorkItemRecord] {
+        let items = try fetchRecords(
+            kind: "work_item",
+            as: WorkItemRecord.self
+        )
+        return items.filter { item in
+            (spaceID == nil || item.spaceID == spaceID)
+                && (threadID == nil || item.threadID == threadID)
+                && (projectID == nil || item.projectID == projectID)
+        }
+    }
+
+    public func fetchWorkItem(id: UUID) throws -> WorkItemRecord? {
+        try fetchRecord(kind: "work_item", id: id, as: WorkItemRecord.self)
+    }
+
+    public func upsertWorkItem(_ item: WorkItemRecord) throws {
+        try upsertRecord(
+            kind: "work_item",
+            id: item.id,
+            taskID: nil,
+            sortAt: item.updatedAt,
+            value: item
+        )
+    }
+
+    public func fetchSharedBlocks(
+        spaceID: UUID? = nil,
+        threadID: UUID? = nil
+    ) throws -> [SharedBlockRecord] {
+        let blocks = try fetchRecords(
+            kind: "shared_block",
+            as: SharedBlockRecord.self
+        )
+        return blocks
+            .filter { block in
+                (spaceID == nil || block.spaceID == spaceID)
+                    && (threadID == nil || block.threadID == threadID)
+            }
+            .sorted {
+                if $0.positionKey != $1.positionKey {
+                    return $0.positionKey < $1.positionKey
+                }
+                return $0.createdAt < $1.createdAt
+            }
+    }
+
+    public func fetchSharedBlock(id: UUID) throws -> SharedBlockRecord? {
+        try fetchRecord(
+            kind: "shared_block",
+            id: id,
+            as: SharedBlockRecord.self
+        )
+    }
+
+    public func upsertSharedBlock(_ block: SharedBlockRecord) throws {
+        try upsertRecord(
+            kind: "shared_block",
+            id: block.id,
+            taskID: nil,
+            sortAt: block.updatedAt,
+            value: block
+        )
+    }
+
+    // MARK: - Collaboration event streams
+
+    public func fetchSpaceEvents(
+        spaceID: UUID,
+        threadID: UUID? = nil
+    ) throws -> [SpaceEventRecord] {
+        try fetchRecords(
+            kind: "space_event",
+            as: SpaceEventRecord.self
+        )
+        .filter {
+            $0.spaceID == spaceID
+                && (threadID == nil || $0.threadID == threadID)
+        }
+        .sorted {
+            if $0.sequence != $1.sequence {
+                return $0.sequence < $1.sequence
+            }
+            return $0.occurredAt < $1.occurredAt
+        }
+    }
+
+    public func fetchSpaceEvent(id: UUID) throws -> SpaceEventRecord? {
+        try fetchRecord(kind: "space_event", id: id, as: SpaceEventRecord.self)
+    }
+
+    public func upsertSpaceEvent(_ event: SpaceEventRecord) throws {
+        try upsertRecord(
+            kind: "space_event",
+            id: event.id,
+            taskID: nil,
+            sortAt: event.occurredAt,
+            value: event
+        )
+    }
+
+    public func fetchRuntimeEvents(
+        runID: UUID,
+        bindingID: UUID? = nil
+    ) throws -> [RuntimeEventRecord] {
+        try fetchRecords(
+            kind: "runtime_event",
+            as: RuntimeEventRecord.self
+        )
+        .filter {
+            $0.runID == runID
+                && (bindingID == nil || $0.bindingID == bindingID)
+        }
+        .sorted {
+            if $0.sequence != $1.sequence {
+                return $0.sequence < $1.sequence
+            }
+            return $0.occurredAt < $1.occurredAt
+        }
+    }
+
+    public func fetchRuntimeEvent(id: UUID) throws -> RuntimeEventRecord? {
+        try fetchRecord(kind: "runtime_event", id: id, as: RuntimeEventRecord.self)
+    }
+
+    public func upsertRuntimeEvent(_ event: RuntimeEventRecord) throws {
+        try upsertRecord(
+            kind: "runtime_event",
+            id: event.id,
+            taskID: nil,
+            sortAt: event.occurredAt,
+            value: event
+        )
+    }
+
+    public func fetchPresenceSessions(
+        spaceID: UUID,
+        includingExpired: Bool = false,
+        now: Date = Date()
+    ) throws -> [PresenceSessionRecord] {
+        try fetchRecords(
+            kind: "presence_session",
+            as: PresenceSessionRecord.self
+        )
+        .filter {
+            $0.spaceID == spaceID
+                && (includingExpired || !$0.isExpired(at: now))
+        }
+        .sorted {
+            if $0.state != $1.state {
+                return $0.state == .online
+            }
+            return $0.lastSeenAt > $1.lastSeenAt
+        }
+    }
+
+    public func fetchPresenceSession(id: UUID) throws -> PresenceSessionRecord? {
+        try fetchRecord(
+            kind: "presence_session",
+            id: id,
+            as: PresenceSessionRecord.self
+        )
+    }
+
+    public func upsertPresenceSession(_ session: PresenceSessionRecord) throws {
+        try upsertRecord(
+            kind: "presence_session",
+            id: session.id,
+            taskID: nil,
+            sortAt: session.lastSeenAt,
+            value: session
+        )
+    }
+
+    // MARK: - Collaboration optimistic writes
+
+    public func updateCollaborationSpace(
+        _ space: CollaborationSpaceRecord,
+        expectedVersion: Int64
+    ) throws {
+        try upsertVersionedRecord(
+            kind: "collaboration_space",
+            id: space.id,
+            sortAt: space.updatedAt,
+            value: space,
+            expectedVersion: expectedVersion
+        )
+    }
+
+    public func updateSpaceThread(
+        _ thread: SpaceThreadRecord,
+        expectedVersion: Int64
+    ) throws {
+        try upsertVersionedRecord(
+            kind: "space_thread",
+            id: thread.id,
+            sortAt: thread.updatedAt,
+            value: thread,
+            expectedVersion: expectedVersion
+        )
+    }
+
+    public func updateSpaceProjectLink(
+        _ link: SpaceProjectLinkRecord,
+        expectedVersion: Int64
+    ) throws {
+        try upsertVersionedRecord(
+            kind: "space_project_link",
+            id: link.id,
+            sortAt: link.updatedAt,
+            value: link,
+            expectedVersion: expectedVersion
+        )
+    }
+
+    public func updateWorkItem(
+        _ item: WorkItemRecord,
+        expectedVersion: Int64
+    ) throws {
+        try upsertVersionedRecord(
+            kind: "work_item",
+            id: item.id,
+            sortAt: item.updatedAt,
+            value: item,
+            expectedVersion: expectedVersion
+        )
+    }
+
+    public func updateSharedBlock(
+        _ block: SharedBlockRecord,
+        expectedVersion: Int64
+    ) throws {
+        try upsertVersionedRecord(
+            kind: "shared_block",
+            id: block.id,
+            sortAt: block.updatedAt,
+            value: block,
+            expectedVersion: expectedVersion
+        )
+    }
+
+    // MARK: - Collaboration outbox
+
+    public func fetchOutbox(
+        spaceID: UUID? = nil,
+        state: CollaborationOutboxState? = nil
+    ) throws -> [CollaborationOutboxRecord] {
+        try fetchRecords(
+            kind: "collaboration_outbox",
+            as: CollaborationOutboxRecord.self
+        )
+        .filter {
+            (spaceID == nil || $0.spaceID == spaceID)
+                && (state == nil || $0.state == state)
+        }
+        .sorted { $0.createdAt < $1.createdAt }
+    }
+
+    public func fetchOutbox(id: UUID) throws -> CollaborationOutboxRecord? {
+        try fetchRecord(
+            kind: "collaboration_outbox",
+            id: id,
+            as: CollaborationOutboxRecord.self
+        )
+    }
+
+    public func fetchOutbox(
+        spaceID: UUID,
+        stream: String,
+        idempotencyKey: String
+    ) throws -> CollaborationOutboxRecord? {
+        try fetchOutbox(spaceID: spaceID).first {
+            $0.stream == stream && $0.idempotencyKey == idempotencyKey
+        }
+    }
+
+    public func upsertOutbox(_ record: CollaborationOutboxRecord) throws {
+        try upsertRecord(
+            kind: "collaboration_outbox",
+            id: record.id,
+            taskID: nil,
+            sortAt: record.updatedAt,
+            value: record
+        )
+    }
+
+    /// Returns the existing record for a repeated command instead of creating
+    /// a second pending command. This makes reconnect/retry safe before a
+    /// remote transport is introduced.
+    @discardableResult
+    public func enqueueOutbox(
+        _ record: CollaborationOutboxRecord
+    ) throws -> CollaborationOutboxRecord {
+        if let existing = try fetchOutbox(
+            spaceID: record.spaceID,
+            stream: record.stream,
+            idempotencyKey: record.idempotencyKey
+        ) {
+            return existing
+        }
+        try upsertOutbox(record)
+        return record
+    }
+
+    public func updateOutbox(
+        _ record: CollaborationOutboxRecord,
+        expectedVersion: Int64
+    ) throws {
+        try upsertVersionedRecord(
+            kind: "collaboration_outbox",
+            id: record.id,
+            sortAt: record.updatedAt,
+            value: record,
+            expectedVersion: expectedVersion
+        )
+    }
+
     public func fetchPrincipals() throws -> [PrincipalRecord] {
         try fetchRecords(kind: "principal", as: PrincipalRecord.self)
     }
@@ -3913,6 +4334,96 @@ public final class SQLiteStore {
                 )
             }
         }
+    }
+
+    private func upsertVersionedRecord<T: CollaborationVersionedRecord>(
+        kind: String,
+        id: UUID,
+        sortAt: Date,
+        value: T,
+        expectedVersion: Int64
+    ) throws {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let existingStatement = try prepare(
+            "SELECT json FROM records WHERE kind = ? AND id = ? COLLATE NOCASE;"
+        )
+        defer { sqlite3_finalize(existingStatement) }
+        bind(kind, at: 1, in: existingStatement)
+        bind(id.uuidString, at: 2, in: existingStatement)
+        let result = sqlite3_step(existingStatement)
+        guard result == SQLITE_ROW,
+              let jsonPointer = sqlite3_column_text(existingStatement, 0) else {
+            if result != SQLITE_DONE {
+                throw lastError()
+            }
+            guard expectedVersion == 0, value.version == 1 else {
+                throw MuError.invalidTransition(
+                    "Cannot create \(kind) \(id) with expected version \(expectedVersion)."
+                )
+            }
+            try insertVersionedRecord(
+                kind: kind,
+                id: id,
+                sortAt: sortAt,
+                value: value
+            )
+            return
+        }
+
+        let existing = try decode(
+            String(cString: jsonPointer),
+            as: T.self
+        )
+        guard existing.version == expectedVersion else {
+            throw MuError.invalidTransition(
+                "Stale \(kind) \(id): expected version \(expectedVersion), "
+                    + "found \(existing.version)."
+            )
+        }
+        guard value.version == expectedVersion + 1 else {
+            throw MuError.invalidTransition(
+                "\(kind) \(id) must advance to version \(expectedVersion + 1)."
+            )
+        }
+
+        let json = try encode(value)
+        let statement = try prepare(
+            """
+            UPDATE records
+            SET sort_at = ?, json = ?
+            WHERE kind = ? AND id = ? COLLATE NOCASE;
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        bind(Self.dateString(sortAt), at: 1, in: statement)
+        bind(json, at: 2, in: statement)
+        bind(kind, at: 3, in: statement)
+        bind(id.uuidString, at: 4, in: statement)
+        try stepDone(statement)
+        guard sqlite3_changes(database) == 1 else {
+            throw MuError.invalidTransition(
+                "Concurrent update rejected for \(kind) \(id)."
+            )
+        }
+    }
+
+    private func insertVersionedRecord<T: CollaborationVersionedRecord>(
+        kind: String,
+        id: UUID,
+        sortAt: Date,
+        value: T
+    ) throws {
+        let statement = try prepare(
+            "INSERT INTO records(kind, id, task_id, sort_at, json) VALUES (?, ?, NULL, ?, ?);"
+        )
+        defer { sqlite3_finalize(statement) }
+        bind(kind, at: 1, in: statement)
+        bind(id.uuidString, at: 2, in: statement)
+        bind(Self.dateString(sortAt), at: 3, in: statement)
+        bind(try encode(value), at: 4, in: statement)
+        try stepDone(statement)
     }
 
     private func upsertRecord<T: Encodable>(

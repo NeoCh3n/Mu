@@ -1517,7 +1517,7 @@ final class AppStore: ObservableObject {
         collapsedProjectPaths.remove(path)
         createTask(from: draft)
         transientMessage =
-            "Workspace ready. Send the first message and Mu will summarize the Task title."
+            "Thread ready. Send the first message and Mu will summarize the title."
     }
 
     private func quickTaskEndpoint(for projectPath: String) -> RuntimeEndpoint? {

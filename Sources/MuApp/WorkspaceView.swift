@@ -8,12 +8,17 @@ enum WorkspaceSurface: String, CaseIterable, Identifiable {
     case files
     case browser
     case terminal
+    case changes
     case artifacts
 
     var id: String { rawValue }
 
     var title: String {
-        self == .artifacts ? "Review" : rawValue.capitalized
+        switch self {
+        case .artifacts: "Review"
+        case .changes: "Changes"
+        default: rawValue.capitalized
+        }
     }
 
     func localizedTitle(for language: MuInterfaceLanguage) -> String {
@@ -22,6 +27,7 @@ enum WorkspaceSurface: String, CaseIterable, Identifiable {
         case .files: muText(language, "Files", "文件")
         case .browser: muText(language, "Browser", "浏览器")
         case .terminal: muText(language, "Terminal", "终端")
+        case .changes: muText(language, "Changes", "变更")
         case .artifacts: muText(language, "Review", "产物")
         }
     }
@@ -32,6 +38,7 @@ enum WorkspaceSurface: String, CaseIterable, Identifiable {
         case .files: "folder"
         case .browser: "safari"
         case .terminal: "terminal"
+        case .changes: "arrow.triangle.2.circlepath"
         case .artifacts: "shippingbox"
         }
     }
@@ -42,6 +49,44 @@ struct AgentWorkspaceView: View {
     let task: TaskRecord
     @State private var surface: WorkspaceSurface = .chat
     @State private var showingEnvironment = false
+
+    private var activeRun: RunRecord? {
+        if let currentRunID = task.currentRunID,
+           let run = store.runs(for: task.id).first(where: { $0.id == currentRunID }) {
+            return run
+        }
+        return store.runs(for: task.id).first {
+            $0.state == .active || $0.state == .starting || $0.state == .blocked
+        }
+    }
+
+    private var activeBinding: RuntimeSessionBinding? {
+        let bindings = store.sessionBindings(for: task.id)
+        if let runID = activeRun?.id,
+           let binding = bindings.first(where: { $0.runID == runID }) {
+            return binding
+        }
+        return bindings.first {
+            $0.endpointID == task.currentEndpointID
+                && ($0.state == .working || $0.state == .awaitingApproval || $0.state == .connecting)
+        } ?? bindings.first
+    }
+
+    private var toolBinding: WorkspaceToolBinding {
+        WorkspaceToolBinding(
+            taskID: task.id,
+            spaceID: task.spaceID,
+            threadID: task.threadID,
+            workItemID: task.workItemID,
+            projectID: task.projectID,
+            workspaceID: task.workspaceID,
+            runID: activeRun?.id,
+            runtimeSessionBindingID: activeBinding?.id,
+            endpointID: activeBinding?.endpointID ?? task.currentEndpointID,
+            repositoryPath: task.repositoryPath,
+            runLabel: activeRun?.actorName
+        )
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -56,7 +101,7 @@ struct AgentWorkspaceView: View {
                     if showingEnvironment {
                         Divider()
 
-                        WorkspaceInspector(task: task)
+                        WorkspaceInspector(task: task, toolBinding: toolBinding)
                             .frame(minWidth: 250, idealWidth: 285, maxWidth: 320)
                             .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
@@ -223,11 +268,19 @@ struct AgentWorkspaceView: View {
         case .chat:
             WorkspaceChatSurface(task: task)
         case .files:
-            WorkspaceFilesSurface(task: task)
+            WorkspaceFilesSurface(task: task, toolBinding: toolBinding)
         case .browser:
-            WorkspaceBrowserSurface(task: task)
+            WorkspaceBrowserSurface(task: task, toolBinding: toolBinding)
         case .terminal:
-            WorkspaceTerminalSurface(task: task)
+            WorkspaceTerminalSurface(task: task, toolBinding: toolBinding)
+        case .changes:
+            WorkspaceTerminalSurface(
+                task: task,
+                toolBinding: toolBinding,
+                title: "Changes snapshots",
+                subtitle: "Read-only Git status and diff summary for this workspace",
+                presets: [.status, .diffStat]
+            )
         case .artifacts:
             WorkspaceArtifactsSurface(task: task)
         }
@@ -239,6 +292,8 @@ private struct WorkspaceChatSurface: View {
     let task: TaskRecord
     @State private var message = ""
     @State private var selectedRuntimeID: UUID?
+    @State private var selectedModel: String?
+    @State private var selectedPermissionProfile: String?
     @State private var isImportedContextExpanded = true
     @State private var isPresentingHistoryFlow = false
     @State private var isActivityExpanded = true
@@ -351,7 +406,7 @@ private struct WorkspaceChatSurface: View {
         VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Workspace chat")
+                    Text("Thread")
                         .font(.headline)
                     Text(
                         store.interfaceLanguage == .simplifiedChinese
@@ -448,7 +503,7 @@ private struct WorkspaceChatSurface: View {
                 && !hasStreamingOutput {
                 EmptyState(
                     symbol: "bubble.left",
-                    title: "No workspace messages",
+                    title: "No Thread messages",
                     message: "Choose a Runtime below to start work, or send a local note without selecting one."
                 )
             } else {
@@ -559,6 +614,85 @@ private struct WorkspaceChatSurface: View {
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
+
+                if let capabilities = selectedRuntimeCapabilities {
+                    HStack(spacing: 6) {
+                        if capabilities.canSelectContext {
+                            StatusPill(
+                                label: store.interfaceLanguage == .simplifiedChinese
+                                    ? "Context 可用"
+                                    : "Context available",
+                                color: MuPalette.mint,
+                                symbol: "checkmark.shield"
+                            )
+                        }
+                        if capabilities.canChooseModel {
+                            Menu {
+                                ForEach(capabilities.modelOptions, id: \.self) { model in
+                                    Button(model) {
+                                        selectedModel = model
+                                    }
+                                }
+                            } label: {
+                                Label(
+                                    selectedModel
+                                        ?? (store.interfaceLanguage == .simplifiedChinese
+                                            ? "选择模型"
+                                            : "Choose model"),
+                                    systemImage: "cpu"
+                                )
+                            }
+                            .menuStyle(.borderlessButton)
+                            .font(.caption.weight(.semibold))
+                        } else {
+                            StatusPill(
+                                label: store.interfaceLanguage == .simplifiedChinese
+                                    ? "模型：Runtime 默认"
+                                    : "Model: Runtime default",
+                                color: .secondary,
+                                symbol: "cpu"
+                            )
+                        }
+                        if capabilities.canChoosePermission {
+                            Menu {
+                                ForEach(capabilities.permissionOptions, id: \.self) { permission in
+                                    Button(permission) {
+                                        selectedPermissionProfile = permission
+                                    }
+                                }
+                            } label: {
+                                Label(
+                                    selectedPermissionProfile
+                                        ?? (store.interfaceLanguage == .simplifiedChinese
+                                            ? "选择权限"
+                                            : "Choose permission"),
+                                    systemImage: "lock"
+                                )
+                            }
+                            .menuStyle(.borderlessButton)
+                            .font(.caption.weight(.semibold))
+                        } else {
+                            StatusPill(
+                                label: store.interfaceLanguage == .simplifiedChinese
+                                    ? "权限：\(capabilities.permissionModel.displayName)"
+                                    : "Permission: \(capabilities.permissionModel.displayName)",
+                                color: .secondary,
+                                symbol: "lock"
+                            )
+                        }
+                        if capabilities.canResolveApproval {
+                            StatusPill(
+                                label: store.interfaceLanguage == .simplifiedChinese
+                                    ? "支持批准"
+                                    : "Approvals",
+                                color: MuPalette.coral,
+                                symbol: "checkmark.seal"
+                            )
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .transition(.opacity)
+                }
                 HStack(alignment: .bottom, spacing: 10) {
                     TextField(
                         store.interfaceLanguage == .simplifiedChinese
@@ -647,6 +781,10 @@ private struct WorkspaceChatSurface: View {
                     .submitInput,
                     endpointIsActive: true
                 )
+                && $0.gatewayManifest.supports(
+                    .observeEvents,
+                    endpointIsActive: true
+                )
         }.sorted {
             $0.muRuntimePickerLabel.localizedCaseInsensitiveCompare(
                 $1.muRuntimePickerLabel
@@ -668,6 +806,14 @@ private struct WorkspaceChatSurface: View {
             return endpoint
         }
         return selectableRuntimeEndpoints.first
+    }
+
+    private var selectedRuntimeCapabilities: RuntimeComposerCapabilities? {
+        guard let selectedRuntime else { return nil }
+        return RuntimeComposerCapabilities.forEndpoint(
+            selectedRuntime,
+            hasAuthorizedContext: !enabledImportedConversations.isEmpty
+        )
     }
 
     private func send() {
@@ -3111,10 +3257,12 @@ private final class WorkspaceFilesModel: ObservableObject {
 
 private struct WorkspaceFilesSurface: View {
     let task: TaskRecord
+    let toolBinding: WorkspaceToolBinding
     @StateObject private var model: WorkspaceFilesModel
 
-    init(task: TaskRecord) {
+    init(task: TaskRecord, toolBinding: WorkspaceToolBinding) {
         self.task = task
+        self.toolBinding = toolBinding
         _model = StateObject(
             wrappedValue: WorkspaceFilesModel(rootPath: task.repositoryPath)
         )
@@ -3126,7 +3274,8 @@ private struct WorkspaceFilesSurface: View {
                 surfaceTitle(
                     "Files",
                     subtitle: "Read-only tree · \(model.files.count) visible items",
-                    symbol: "folder"
+                    symbol: "folder",
+                    binding: toolBinding
                 )
                 Divider()
                 if model.isLoading {
@@ -3249,6 +3398,7 @@ private struct BrowserWebView: NSViewRepresentable {
 
 private struct WorkspaceBrowserSurface: View {
     let task: TaskRecord
+    let toolBinding: WorkspaceToolBinding
     @StateObject private var session = BrowserSession()
     @State private var address = "https://github.com"
     @State private var hasLoaded = false
@@ -3278,6 +3428,8 @@ private struct WorkspaceBrowserSurface: View {
                     Label("README", systemImage: "doc.richtext")
                 }
                 .help("Open the workspace README without using the network")
+                Spacer(minLength: 4)
+                WorkspaceToolBindingBadge(binding: toolBinding)
             }
             .buttonStyle(.borderless)
             .padding(12)
@@ -3340,20 +3492,39 @@ private struct WorkspaceBrowserSurface: View {
 private struct WorkspaceTerminalSurface: View {
     @EnvironmentObject private var store: AppStore
     let task: TaskRecord
+    let toolBinding: WorkspaceToolBinding
+    let title: String
+    let subtitle: String
+    let presets: [TerminalPreset]
     @State private var result: TerminalResult?
     @State private var isRunning = false
+
+    init(
+        task: TaskRecord,
+        toolBinding: WorkspaceToolBinding,
+        title: String = "Terminal snapshots",
+        subtitle: String = "Fixed read-only commands · no interactive shell",
+        presets: [TerminalPreset] = TerminalPreset.allCases
+    ) {
+        self.task = task
+        self.toolBinding = toolBinding
+        self.title = title
+        self.subtitle = subtitle
+        self.presets = presets
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Terminal snapshots")
+                    Text(title)
                         .font(.headline)
-                    Text("Fixed read-only commands · no interactive shell")
+                    Text(subtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                WorkspaceToolBindingBadge(binding: toolBinding)
                 if isRunning {
                     ProgressView()
                         .controlSize(.small)
@@ -3368,7 +3539,7 @@ private struct WorkspaceTerminalSurface: View {
             .padding(18)
 
             HStack(spacing: 8) {
-                ForEach(TerminalPreset.allCases) { preset in
+                ForEach(presets) { preset in
                     Button(preset.title) {
                         run(preset)
                     }
@@ -3639,6 +3810,7 @@ private struct WorkspaceArtifactsSurface: View {
 private struct WorkspaceInspector: View {
     @EnvironmentObject private var store: AppStore
     let task: TaskRecord
+    let toolBinding: WorkspaceToolBinding
 
     private var currentRun: RunRecord? {
         store.runs(for: task.id).first { $0.id == task.currentRunID }
@@ -3707,6 +3879,23 @@ private struct WorkspaceInspector: View {
                     Label("State saves continuously", systemImage: "checkmark.circle.fill")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(MuPalette.mint)
+                }
+
+                inspectorSection("TOOL SCOPE") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label(toolBinding.scopeLabel, systemImage: "scope")
+                            .font(.subheadline.weight(.semibold))
+                        if let nativeBindingLabel = toolBinding.nativeBindingLabel {
+                            Label(nativeBindingLabel, systemImage: "link")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(toolBinding.repositoryPath)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
                 }
 
                 inspectorSection("OBJECTIVE") {
@@ -4157,7 +4346,35 @@ private struct WorkspaceInspector: View {
     }
 }
 
-private func surfaceTitle(_ title: String, subtitle: String, symbol: String) -> some View {
+private struct WorkspaceToolBindingBadge: View {
+    let binding: WorkspaceToolBinding
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: binding.runID == nil ? "square.stack.3d.up" : "bolt.horizontal")
+            Text(binding.scopeLabel)
+                .lineLimit(1)
+            if let nativeBindingLabel = binding.nativeBindingLabel {
+                Text("·")
+                Text(nativeBindingLabel)
+                    .lineLimit(1)
+            }
+        }
+        .font(.caption2.weight(.semibold))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Color.primary.opacity(0.045), in: Capsule())
+        .help("This tool is scoped to the current Thread workspace and selected Agent Run.")
+    }
+}
+
+private func surfaceTitle(
+    _ title: String,
+    subtitle: String,
+    symbol: String,
+    binding: WorkspaceToolBinding? = nil
+) -> some View {
     HStack(spacing: 10) {
         Image(systemName: symbol)
             .foregroundStyle(MuPalette.violet)
@@ -4169,6 +4386,9 @@ private func surfaceTitle(_ title: String, subtitle: String, symbol: String) -> 
                 .foregroundStyle(.secondary)
         }
         Spacer()
+        if let binding {
+            WorkspaceToolBindingBadge(binding: binding)
+        }
     }
     .padding(14)
 }

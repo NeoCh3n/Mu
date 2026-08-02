@@ -14,7 +14,7 @@ struct MuApp: App {
         .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button(muText(store.interfaceLanguage, "New Project", "新建 Project")) {
+                Button(muText(store.interfaceLanguage, "New Thread", "新建 Thread")) {
                     store.openNewTask()
                 }
                 .keyboardShortcut("n", modifiers: .command)
