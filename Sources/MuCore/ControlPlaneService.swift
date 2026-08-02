@@ -82,6 +82,13 @@ public final class ControlPlaneService: @unchecked Sendable {
     public static let relayAgentID = UUID(
         uuidString: "47A9E791-DDE4-498C-8BBA-4D8EF7AD2DC0"
     )!
+    private static let starterAgentIDs: Set<UUID> = [
+        atlasAgentID,
+        forgeAgentID,
+        lensAgentID,
+        scoutAgentID,
+        relayAgentID
+    ]
     public static let codexImplementedCapabilities: Set<RuntimeCapability> = [
         .start,
         .replan,
@@ -116,6 +123,10 @@ public final class ControlPlaneService: @unchecked Sendable {
     private let openWorkerSyncGate = OpenWorkerSyncGate()
     let codexRuntimeLock = NSLock()
     var activeCodexClients:
+        [UUID: CodexAppServerClient] = [:]
+    /// One long-lived app-server client per endpoint. Creating a new process
+    /// for every Task made first routing pay process launch + initialize time.
+    var cachedCodexClients:
         [UUID: CodexAppServerClient] = [:]
     let claudeRuntimeLock = NSLock()
     var activeClaudeClients:
@@ -165,6 +176,50 @@ public final class ControlPlaneService: @unchecked Sendable {
         try bootstrapProjectKernel()
         try migrateLegacyImportedConversationsToContextSources()
         try refreshRuntimeAdapterRegistrations()
+    }
+
+    deinit {
+        let clients = codexRuntimeLock.withLock {
+            let values = Array(cachedCodexClients.values)
+            cachedCodexClients.removeAll()
+            activeCodexClients.removeAll()
+            return values
+        }
+        for client in clients {
+            client.stop()
+        }
+    }
+
+    /// Returns the endpoint-scoped Codex client, creating it without starting
+    /// a process. Callers can then warm it or submit a turn through the same
+    /// persistent app-server connection.
+    func codexClient(for endpoint: RuntimeEndpoint) throws -> CodexAppServerClient {
+        guard let path = endpoint.nativeConfiguration?["executable"] else {
+            throw MuError.commandFailed("Codex executable path is not registered.")
+        }
+        return codexRuntimeLock.withLock {
+            if let cached = cachedCodexClients[endpoint.id] {
+                return cached
+            }
+            let client = CodexAppServerClient(
+                executableURL: URL(fileURLWithPath: path)
+            )
+            cachedCodexClients[endpoint.id] = client
+            return client
+        }
+    }
+
+    /// Best-effort background warm-up. A first Task remains correct if the
+    /// runtime is unavailable, but normally reaches thread/start immediately.
+    public func warmCodexEndpoints() {
+        let endpoints = (try? store.fetchRegisteredEndpoints()) ?? []
+        for endpoint in endpoints where endpoint.runtimeTypeID == Self.codexRuntimeTypeID
+            && (endpoint.status == .active || endpoint.status == .discovered) {
+            guard let client = try? codexClient(for: endpoint) else { continue }
+            DispatchQueue.global(qos: .utility).async {
+                try? client.warm()
+            }
+        }
     }
 
     public func bootstrapEndpoints() throws {
@@ -758,7 +813,9 @@ public final class ControlPlaneService: @unchecked Sendable {
                 RuntimeIdentityConfigurationKey.instanceLabel:
                     normalizedInstanceLabel.isEmpty
                     ? name
-                    : normalizedInstanceLabel
+                    : normalizedInstanceLabel,
+                RuntimeIdentityConfigurationKey.nativeSource:
+                    "user_configured"
             ]
         if let path, !path.isEmpty {
             nativeConfiguration["executable"] = path
@@ -947,12 +1004,11 @@ public final class ControlPlaneService: @unchecked Sendable {
                 == Self.codexRuntimeTypeID else {
             throw MuError.recordNotFound("Codex App Server endpoint")
         }
-        guard let path = endpoint.nativeConfiguration?["executable"] else {
+        guard endpoint.nativeConfiguration?["executable"] != nil else {
             throw MuError.commandFailed("Codex executable path is not registered.")
         }
 
-        let client = CodexAppServerClient(executableURL: URL(fileURLWithPath: path))
-        defer { client.stop() }
+        let client = try codexClient(for: endpoint)
         do {
             let result = try client.probe()
             endpoint.runtimeVersion = Self.codexVersion(from: result.userAgent)
@@ -1293,7 +1349,7 @@ public final class ControlPlaneService: @unchecked Sendable {
               endpoint.capabilities.contains(.start) else {
             throw MuError.capabilityMissing("The live Codex Start capability is not active.")
         }
-        guard let path = endpoint.nativeConfiguration?["executable"] else {
+        guard endpoint.nativeConfiguration?["executable"] != nil else {
             throw MuError.commandFailed("Codex executable path is not registered.")
         }
         guard var task = try store.fetchTask(id: initialRun.taskID),
@@ -1411,7 +1467,7 @@ public final class ControlPlaneService: @unchecked Sendable {
             throw error
         }
 
-        let client = CodexAppServerClient(executableURL: URL(fileURLWithPath: path))
+        let client = try codexClient(for: endpoint)
         codexRuntimeLock.withLock {
             activeCodexClients[runID] = client
         }
@@ -1419,7 +1475,6 @@ public final class ControlPlaneService: @unchecked Sendable {
             _ = codexRuntimeLock.withLock {
                 activeCodexClients.removeValue(forKey: runID)
             }
-            client.stop()
         }
         let mirror = ClaudeCodeOutputMirror {
             [weak self] text, force in
@@ -1432,6 +1487,7 @@ public final class ControlPlaneService: @unchecked Sendable {
                 runtimeName: "Codex"
             )
         }
+        let activityTaskID = initialRun.taskID
         do {
             try recordContextDelivery(
                 projectID: kernel.project.id,
@@ -1550,6 +1606,17 @@ public final class ControlPlaneService: @unchecked Sendable {
                 },
                 onVisibleText: { text in
                     mirror.offer(text)
+                },
+                onActivity: { [weak self] activity in
+                    guard let self else { return }
+                    try? self.persistRuntimeActivity(
+                        activity,
+                        taskID: activityTaskID,
+                        runID: runID,
+                        projectID: kernel.project.id,
+                        workspaceID: kernel.workspace.id,
+                        bindingID: bindingID
+                    )
                 }
             )
             mirror.finish(result.output)
@@ -1765,7 +1832,7 @@ public final class ControlPlaneService: @unchecked Sendable {
               endpoint.status == .active else {
             throw MuError.capabilityMissing("The live Codex endpoint is not active.")
         }
-        guard let path = endpoint.nativeConfiguration?["executable"] else {
+        guard endpoint.nativeConfiguration?["executable"] != nil else {
             throw MuError.commandFailed("Codex executable path is not registered.")
         }
         guard let task = try store.fetchTask(id: run.taskID) else {
@@ -1797,8 +1864,7 @@ public final class ControlPlaneService: @unchecked Sendable {
             )
         }
 
-        let client = CodexAppServerClient(executableURL: URL(fileURLWithPath: path))
-        defer { client.stop() }
+        let client = try codexClient(for: endpoint)
         do {
             let result = try client.runReadOnlyReplan(
                 checkpoint: checkpoint,
@@ -2109,7 +2175,8 @@ public final class ControlPlaneService: @unchecked Sendable {
     @discardableResult
     public func prepareWorkspaceMessage(
         taskID: UUID,
-        text: String
+        text: String,
+        selectedEndpointID: UUID? = nil
     ) throws -> PreparedWorkspaceMessage {
         guard let task = try store.fetchTask(id: taskID) else {
             throw MuError.recordNotFound("Task \(taskID)")
@@ -2118,13 +2185,22 @@ public final class ControlPlaneService: @unchecked Sendable {
         guard !trimmed.isEmpty else {
             throw MuError.invalidTransition("Chat message cannot be empty.")
         }
-        let agents = try store.fetchAgents()
+        // Starter identities remain readable for historical records, but a
+        // new Project chat must not surface or route to them implicitly.
+        let agents = try store.fetchAgents().filter {
+            !Self.starterAgentIDs.contains($0.id)
+        }
         let endpoints = try store.fetchRegisteredEndpoints()
+        if let selectedEndpointID,
+           !endpoints.contains(where: { $0.id == selectedEndpointID }) {
+            throw MuError.recordNotFound("Selected Runtime (selectedEndpointID)")
+        }
         let route = try WorkspaceChatRouter.resolve(
             text: trimmed,
             assignedAgentIdentityID: task.assignedAgentIdentityID,
             agents: agents,
-            endpoints: endpoints
+            endpoints: endpoints,
+            selectedEndpointID: selectedEndpointID
         )
 
         guard let route else {
@@ -4639,6 +4715,61 @@ public final class ControlPlaneService: @unchecked Sendable {
         guard let slash = userAgent.firstIndex(of: "/") else { return userAgent }
         let suffix = userAgent[userAgent.index(after: slash)...]
         return String(suffix.prefix { !$0.isWhitespace && $0 != "(" })
+    }
+
+    func persistRuntimeActivity(
+        _ activity: RuntimeActivityEvent,
+        taskID: UUID,
+        runID: UUID,
+        projectID: UUID,
+        workspaceID: UUID,
+        bindingID: UUID
+    ) throws {
+        var payload: [String: String] = [
+            "phase": activity.phase,
+            "status": activity.status,
+            "binding_id": bindingID.uuidString
+        ]
+        if let id = activity.id { payload["activity_id"] = id }
+        if let detail = activity.detail { payload["detail"] = Self.redactRuntimeActivity(detail) }
+        if let toolName = activity.toolName { payload["tool_name"] = toolName }
+        if let path = activity.path { payload["path"] = Self.redactRuntimeActivity(path) }
+        if let command = activity.command { payload["command"] = Self.redactRuntimeActivity(command) }
+        if let requestID = activity.requestID { payload["request_id"] = requestID }
+        if let artifactID = activity.artifactID { payload["artifact_id"] = artifactID }
+        try store.withTransaction {
+            if var binding = try store.fetchRuntimeSessionBinding(id: bindingID) {
+                binding.state = activity.status == "blocked" ? .awaitingApproval : .working
+                binding.lastActivitySummary = activity.title
+                binding.updatedAt = Date()
+                try store.upsertRuntimeSessionBinding(binding)
+            }
+            try store.appendEvent(
+                LedgerEvent(
+                    projectID: projectID,
+                    workspaceID: workspaceID,
+                    taskID: taskID,
+                    runID: runID,
+                    type: "runtime.activity",
+                    summary: Self.redactRuntimeActivity(activity.title),
+                    payload: payload
+                )
+            )
+        }
+    }
+
+    private static func redactRuntimeActivity(_ value: String) -> String {
+        value
+            .replacingOccurrences(
+                of: #"(?i)(sk|key|token|secret)[-_][A-Za-z0-9._-]+"#,
+                with: "[redacted]",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"(?i)Bearer\s+[A-Za-z0-9._-]+"#,
+                with: "Bearer [redacted]",
+                options: .regularExpression
+            )
     }
 
     private static func planLines(from output: String) -> [String] {

@@ -340,6 +340,42 @@ struct RuntimeGatewayTests {
     }
 
     @Test
+    func selectedRuntimeResolvesGenericAliasAndPlainComposerText() throws {
+        let firstCodex = endpoint(
+            id: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
+            runtimeTypeID: ControlPlaneService.codexRuntimeTypeID,
+            provider: .codex,
+            status: .active
+        )
+        let secondCodex = endpoint(
+            id: UUID(uuidString: "55555555-5555-5555-5555-555555555555")!,
+            runtimeTypeID: ControlPlaneService.codexRuntimeTypeID,
+            provider: .codex,
+            status: .active
+        )
+
+        let plain = try WorkspaceChatRouter.resolve(
+            text: "inspect only the selected workspace",
+            assignedAgentIdentityID: nil,
+            agents: [],
+            endpoints: [firstCodex, secondCodex],
+            selectedEndpointID: secondCodex.id
+        )
+        #expect(plain?.endpointID == secondCodex.id)
+        #expect(plain?.prompt == "inspect only the selected workspace")
+
+        let genericMention = try WorkspaceChatRouter.resolve(
+            text: "@Codex inspect only the selected workspace",
+            assignedAgentIdentityID: nil,
+            agents: [],
+            endpoints: [firstCodex, secondCodex],
+            selectedEndpointID: secondCodex.id
+        )
+        #expect(genericMention?.endpointID == secondCodex.id)
+        #expect(genericMention?.prompt == "inspect only the selected workspace")
+    }
+
+    @Test
     func enabledImportedContextSelectsOnlyEnabledExactWorkspaceSourcesAndQuotesThem() throws {
         let root = try makeTemporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }

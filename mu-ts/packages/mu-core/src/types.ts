@@ -57,6 +57,42 @@ export const RunPurpose = {
 } as const
 export type RunPurpose = (typeof RunPurpose)[keyof typeof RunPurpose]
 
+/**
+ * Mu's provider-neutral reasoning budget. `auto` is resolved per turn from
+ * the task shape; the other values are forwarded when the selected host has
+ * a native effort control (Codex App Server currently does).
+ */
+export const ReasoningEffort = {
+  auto: 'auto',
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  ultra: 'ultra',
+} as const
+export type ReasoningEffort = (typeof ReasoningEffort)[keyof typeof ReasoningEffort]
+
+export function resolveReasoningEffort(params: {
+  requested?: ReasoningEffort
+  title: string
+  objective: string
+  prompt: string
+  constraintCount?: number
+}): Exclude<ReasoningEffort, 'auto'> {
+  if (params.requested !== undefined && params.requested !== 'auto') return params.requested
+  const text = `${params.title} ${params.objective} ${params.prompt}`.toLowerCase()
+  const complexitySignals = [
+    'architecture', 'migration', 'security', 'concurrency', 'multi-step',
+    'refactor', 'debug', 'investigate', 'cross-host', 'integration', 'performance',
+  ]
+  const signalScore = complexitySignals.reduce((score, signal) => score + (text.includes(signal) ? 1 : 0), 0)
+  const lengthScore = Math.floor(text.length / 800)
+  const constraintScore = Math.min(2, params.constraintCount ?? 0)
+  const score = signalScore + lengthScore + constraintScore
+  if (score >= 5) return 'ultra'
+  if (score >= 2) return 'high'
+  return 'medium'
+}
+
 export const HandoffStatus = {
   proposed: 'proposed',
   validating: 'validating',
@@ -216,7 +252,6 @@ export type RuntimeInteractionState =
 export const CONVERSATION_PROVIDER = {
   codex: 'codex',
   claudeCode: 'claude_code',
-  openWorker: 'openworker',
 } as const
 
 export interface ConversationProvider {
@@ -231,14 +266,10 @@ export const CODE_PROVIDER: ConversationProvider = provider(CONVERSATION_PROVIDE
 export const CLAUDE_CODE_PROVIDER: ConversationProvider = provider(
   CONVERSATION_PROVIDER.claudeCode,
 )
-export const OPEN_WORKER_PROVIDER: ConversationProvider = provider(
-  CONVERSATION_PROVIDER.openWorker,
-)
 
 const PROVIDER_DISPLAY: Record<string, string> = {
   codex: 'Codex',
   claude_code: 'Claude Code',
-  openworker: 'OpenWorker',
 }
 
 export function providerDisplayName(p: ConversationProvider): string {
@@ -305,6 +336,18 @@ export interface AgentRuntimeInstanceIdentity {
   readonly nativeSource?: string
 }
 
+/**
+ * Immutable endpoint identity passed to every host operation. A provider name
+ * alone is insufficient when a user has multiple CLI terminals or a desktop
+ * and CLI surface installed at the same time.
+ */
+export interface AgentRuntimeEndpointScope {
+  readonly endpointID: UUID
+  readonly runtimeTypeID: string
+  readonly displayName: string
+  readonly instanceIdentity: AgentRuntimeInstanceIdentity
+}
+
 export function agentRuntimeInstanceIdentity(
   params: AgentRuntimeInstanceIdentity,
 ): AgentRuntimeInstanceIdentity {
@@ -325,6 +368,5 @@ export function hasConcreteTerminalIdentity(identity: AgentRuntimeInstanceIdenti
 
 export const codexRuntimeTypeID = 'openai.codex/app-server'
 export const claudeCodeRuntimeTypeID = 'anthropic.claude-code/cli'
-export const openWorkerRuntimeTypeID = 'andrewyng.openworker/desktop'
 
 export type UUIDRef = UUID

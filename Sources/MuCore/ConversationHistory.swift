@@ -14,13 +14,46 @@ public struct ConversationProvider:
     }
 
     public init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        self.rawValue = try container.decode(String.self)
+        // Older Swift/TS persistence encoded this value as
+        // `{ "rawValue": "codex" }`.  Keep the canonical wire format as a
+        // string, but accept that legacy wrapper so a pre-contract database
+        // remains readable after an app update.
+        if let value = try? decoder.singleValueContainer().decode(String.self) {
+            self.rawValue = value
+            return
+        }
+        let container = try decoder.container(keyedBy: LegacyCodingKey.self)
+        guard let value = try container.decodeIfPresent(String.self, forKey: LegacyCodingKey(rawValue: "rawValue")) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: LegacyCodingKey(rawValue: "rawValue"),
+                in: container,
+                debugDescription: "ConversationProvider must be a string or a rawValue wrapper."
+            )
+        }
+        self.rawValue = value
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
         try container.encode(rawValue)
+    }
+
+    private struct LegacyCodingKey: CodingKey {
+        var stringValue: String
+        var intValue: Int?
+
+        init(rawValue: String) {
+            stringValue = rawValue
+            intValue = nil
+        }
+
+        init?(stringValue: String) {
+            self.init(rawValue: stringValue)
+        }
+
+        init?(intValue: Int) {
+            return nil
+        }
     }
 
     public static let codex = ConversationProvider(rawValue: "codex")

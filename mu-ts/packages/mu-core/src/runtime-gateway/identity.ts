@@ -6,7 +6,6 @@ import {
   AgentRuntimeSurfaceKind,
   codexRuntimeTypeID,
   claudeCodeRuntimeTypeID,
-  openWorkerRuntimeTypeID,
   provider,
   providerDisplayName,
   RuntimeIdentityConfigurationKey,
@@ -99,7 +98,6 @@ function inferredProvider(runtimeTypeID: string): ConversationProvider {
   const normalized = runtimeTypeID.toLowerCase()
   if (normalized.includes('codex')) return provider('codex')
   if (normalized.includes('claude')) return provider('claude_code')
-  if (normalized.includes('openworker')) return provider('openworker')
   const vendor = normalized.split('/')[0] ?? normalized
   return provider(vendor)
 }
@@ -200,5 +198,4 @@ function nonempty(value: string | undefined): string | undefined {
 export const RUNTIME_TYPE_IDS = {
   codex: codexRuntimeTypeID,
   claudeCode: claudeCodeRuntimeTypeID,
-  openWorker: openWorkerRuntimeTypeID,
 } as const

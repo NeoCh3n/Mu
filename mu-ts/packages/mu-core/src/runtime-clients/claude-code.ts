@@ -5,6 +5,7 @@ import path from 'node:path'
 import { MuError } from '../errors.ts'
 import { uuid, type UUID } from '../identity.ts'
 import type { TaskRecord } from '../models.ts'
+import type { HarnessActivityEvent } from '../harness/types.ts'
 import type { ProjectContextPackRecord } from '../project-kernel/index.ts'
 import { renderedContextPackMarkdown } from '../project-kernel/index.ts'
 import { runProcess } from '../persistence/process-capture.ts'
@@ -67,6 +68,82 @@ function asInteger(value: unknown): number | undefined {
   return n === undefined ? undefined : Math.trunc(n)
 }
 
+function safeActivityText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const normalized = value
+    .replace(/(?:sk|key|token|secret)[-_][A-Za-z0-9._-]+/gi, '[redacted]')
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [redacted]')
+    .trim()
+  if (normalized === '') return undefined
+  return normalized.length > 240 ? `${normalized.slice(0, 237)}…` : normalized
+}
+
+function objectValue(value: unknown): JsonObject | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as JsonObject
+    : undefined
+}
+
+function activityForTool(
+  toolName: string,
+  input: unknown,
+  status: HarnessActivityEvent['status'],
+  id?: string,
+): HarnessActivityEvent {
+  const tool = toolName.trim() || 'tool'
+  const values = objectValue(input)
+  const pathValue = safeActivityText(
+    values?.['file_path'] ?? values?.['path'] ?? values?.['filePath'] ?? values?.['pattern'],
+  )
+  const command = safeActivityText(values?.['command'] ?? values?.['cmd'])
+  const fileTool = /^(read|glob|grep|edit|write|multiedit|notebook)/i.test(tool)
+  const phase = fileTool ? 'file' : 'tool'
+  const verb = status === 'completed' ? (fileTool ? 'Read' : 'Used') : status === 'failed' ? 'Failed' : (fileTool ? 'Reading' : 'Using')
+  const target = pathValue ?? (command === undefined ? tool : `\`${command}\``)
+  return {
+    id,
+    phase,
+    status,
+    title: `${verb} ${target}`,
+    detail: command ?? (pathValue === undefined ? `Tool: ${tool}` : undefined),
+    toolName: tool,
+    path: pathValue,
+    command,
+  }
+}
+
+function activityFromContentBlock(block: unknown, status: HarnessActivityEvent['status']): HarnessActivityEvent | undefined {
+  const object = objectValue(block)
+  if (object === undefined) return undefined
+  const type = nonempty(object['type'])
+  if (type === 'thinking') {
+    return {
+      id: nonempty(object['id']),
+      phase: 'thinking',
+      status,
+      title: 'Agent reasoning',
+      detail: 'The host reported a reasoning phase; private reasoning text is not copied into Mu.',
+    }
+  }
+  if (type === 'tool_use') {
+    return activityForTool(
+      nonempty(object['name']) ?? 'tool',
+      object['input'],
+      status,
+      nonempty(object['id']),
+    )
+  }
+  if (type === 'tool_result') {
+    return activityForTool(
+      nonempty(object['name']) ?? 'tool',
+      object['content'],
+      status,
+      nonempty(object['tool_use_id']),
+    )
+  }
+  return undefined
+}
+
 /** Visible text from an assistant message's `content` field. */
 function visibleText(from: unknown): string {
   if (typeof from === 'string') {
@@ -87,8 +164,9 @@ function visibleText(from: unknown): string {
 }
 
 /**
- * Parser for Claude Code's documented stream-json surface. Only visible text
- * and terminal receipts are retained; thinking and tool internals are ignored.
+ * Parser for Claude Code's documented stream-json surface. Visible text and
+ * explicit, safe tool/file receipts are retained; private thinking text is
+ * never copied into the activity detail.
  * Byte-compatible with the Swift ClaudeCodeStreamParser.
  */
 export class ClaudeCodeStreamParser {
@@ -98,9 +176,14 @@ export class ClaudeCodeStreamParser {
   private assistantOrder: string[] = []
   private state: ClaudeCodeStreamState = { visibleText: '' }
   private readonly onVisibleText: (text: string) => void
+  private readonly onActivity: (activity: HarnessActivityEvent) => void
 
-  constructor(onVisibleText: (text: string) => void = () => {}) {
+  constructor(
+    onVisibleText: (text: string) => void = () => {},
+    onActivity: (activity: HarnessActivityEvent) => void = () => {},
+  ) {
     this.onVisibleText = onVisibleText
+    this.onActivity = onActivity
   }
 
   /** Consume a chunk of NDJSON bytes, invoking onVisibleText for each delta. */
@@ -157,6 +240,11 @@ export class ClaudeCodeStreamParser {
         const event = object['event']
         if (typeof event !== 'object' || event === null) return undefined
         const eventObject = event as JsonObject
+        if (eventObject['type'] === 'content_block_start') {
+          const activity = activityFromContentBlock(eventObject['content_block'], 'started')
+          if (activity !== undefined) this.onActivity(activity)
+          return undefined
+        }
         if (eventObject['type'] !== 'content_block_delta') return undefined
         const delta = eventObject['delta']
         if (typeof delta !== 'object' || delta === null) return undefined
@@ -174,6 +262,12 @@ export class ClaudeCodeStreamParser {
         if (messageModel !== undefined) {
           this.state = { ...this.state, model: messageModel }
         }
+        if (Array.isArray(messageObject['content'])) {
+          for (const block of messageObject['content']) {
+            const activity = activityFromContentBlock(block, 'updated')
+            if (activity !== undefined) this.onActivity(activity)
+          }
+        }
         const messageID = nonempty(messageObject['id']) ?? `assistant-${this.assistantOrder.length}`
         const text = visibleText(messageObject['content'])
         if (text === '') return undefined
@@ -183,6 +277,17 @@ export class ClaudeCodeStreamParser {
         this.assistantTexts.set(messageID, text)
         this.partialText = ''
         return this.updateVisibleText()
+      }
+
+      case 'user': {
+        const message = objectValue(object['message'])
+        if (Array.isArray(message?.['content'])) {
+          for (const block of message['content']) {
+            const activity = activityFromContentBlock(block, 'completed')
+            if (activity !== undefined) this.onActivity(activity)
+          }
+        }
+        return undefined
       }
 
       case 'result': {
@@ -205,7 +310,7 @@ export class ClaudeCodeStreamParser {
       }
 
       default:
-        // Tool, thinking, hook, and internal protocol events stay private.
+        // Unknown provider events stay private.
         return undefined
     }
   }
@@ -290,8 +395,10 @@ export class ClaudeCodeClient {
     sessionID?: string
     resumeSessionID?: string
     promptOverride?: string
+    reasoningEffort?: string
     onSessionStarted?: (sessionID: string) => void
     onVisibleText?: (text: string) => void
+    onActivity?: (activity: HarnessActivityEvent) => void
   }): Promise<ClaudeCodeTurnResult> {
     if (!isExecutableFile(this.executableURL)) {
       throw MuError.commandFailed(
@@ -312,13 +419,14 @@ export class ClaudeCodeClient {
       sessionID,
       resumeSessionID: params.resumeSessionID,
       promptOverride: params.promptOverride,
+      reasoningEffort: params.reasoningEffort,
     })
     const process = spawn(this.executableURL, args, {
       cwd: params.task.repositoryPath,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
 
-    const parser = new ClaudeCodeStreamParser(params.onVisibleText)
+    const parser = new ClaudeCodeStreamParser(params.onVisibleText, params.onActivity)
     const stderrChunks: Buffer[] = []
     process.stdout.on('data', (data: Buffer) => parser.consume(data))
     process.stderr.on('data', (data: Buffer) => stderrChunks.push(data))
@@ -385,6 +493,7 @@ export function claudeCodeArguments(params: {
   sessionID: string
   resumeSessionID?: string
   promptOverride?: string
+  reasoningEffort?: string
 }): string[] {
   const values: string[] = [
     '--print',
@@ -404,9 +513,22 @@ export function claudeCodeArguments(params: {
   } else {
     values.push('--session-id', params.sessionID)
   }
+  const effort = claudeEffort(params.reasoningEffort)
+  if (effort !== undefined) values.push('--effort', effort)
   const prompt = params.promptOverride ?? renderedContextPackMarkdown(params.contextPack)
   values.push(prompt)
   return values
+}
+
+/** Mu's `ultra` maps to Claude Code's current `max` CLI effort. */
+function claudeEffort(value: string | undefined): 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined {
+  switch (value) {
+    case 'low': return 'low'
+    case 'medium': return 'medium'
+    case 'high': return 'high'
+    case 'ultra': return 'max'
+    default: return undefined
+  }
 }
 
 // ---------------------------------------------------------------------------

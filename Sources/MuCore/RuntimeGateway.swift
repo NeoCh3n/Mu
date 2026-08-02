@@ -375,7 +375,7 @@ public enum RuntimeGatewayRegistry {
             ),
             conditional(
                 .observeEvents,
-                "Visible stream-json text is mirrored; thinking and tool internals are excluded."
+                "Visible stream-json text plus safe tool/file receipts are mirrored; private reasoning text is excluded."
             ),
             conditional(
                 .interrupt,

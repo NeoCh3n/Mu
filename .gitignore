@@ -6,3 +6,4 @@ runtime-control-plane-transfer/.bundle/
 DerivedData/
 *.xcuserstate
 Mu.app/
+node_modules/

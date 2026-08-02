@@ -3,10 +3,8 @@ import type { RuntimeEndpoint } from '../models.ts'
 import {
   CLAUDE_CODE_PROVIDER,
   CODE_PROVIDER,
-  OPEN_WORKER_PROVIDER,
   claudeCodeRuntimeTypeID,
   codexRuntimeTypeID,
-  openWorkerRuntimeTypeID,
 } from '../types.ts'
 import { createBuiltinRuntimeGatewayAdapter, type RuntimeGatewayAdapter } from './adapter.ts'
 import { resolvedInstanceIdentity } from './identity.ts'
@@ -79,7 +77,7 @@ const claudeCode = createBuiltinRuntimeGatewayAdapter({
     conditionalOperation('input.submit', 'Requires an active exact-workspace CLI session.'),
     conditionalOperation(
       'events.observe',
-      'Visible stream-json text is mirrored; thinking and tool internals are excluded.',
+      'Visible stream-json text plus safe tool/file receipts are mirrored; private reasoning text is excluded.',
     ),
     conditionalOperation('interrupt', 'Available while the Mu-launched CLI process is active.'),
     conditionalOperation('resume', 'Requires a persisted Claude Code session ID.'),
@@ -106,49 +104,9 @@ const claudeCode = createBuiltinRuntimeGatewayAdapter({
   ],
 })
 
-const openWorker = createBuiltinRuntimeGatewayAdapter({
-  adapterID: 'mu.runtime.openworker-sidecar',
-  provider: OPEN_WORKER_PROVIDER,
-  connectionKind: 'connected_agent',
-  controlMode: 'attached',
-  trustLevel: 'connected',
-  observationFidelity: 'native_stream',
-  declarations: [
-    supportedOperation('history.discover'),
-    supportedOperation('history.read'),
-    conditionalOperation('session.create', 'Requires a verified loopback sidecar.'),
-    conditionalOperation('session.attach', 'Requires an exact-workspace native session.'),
-    conditionalOperation('input.submit', 'Requires an idle linked session.'),
-    conditionalOperation('events.observe', 'Requires a verified session WebSocket.'),
-    conditionalOperation('interrupt', 'Requires a live linked session.'),
-    conditionalOperation('resume', 'Requires a persistent native session.'),
-    conditionalOperation('approval.resolve', 'Requires a pending native Inbox request.'),
-    conditionalOperation('artifact.list', 'Requires a verified exact-workspace session.'),
-    supportedOperation('artifact.submit'),
-    conditionalOperation('task_lease.accept', 'Requires an active endpoint.'),
-    conditionalOperation('task_lease.renew', 'Requires a live binding heartbeat.'),
-    supportedOperation('project_event.publish'),
-    supportedOperation('task.complete'),
-    supportedOperation('task.fail'),
-    conditionalOperation(
-      'context.search',
-      'Requires the exact active Runtime binding and Run, plus a governed Context Pack with a delivered receipt.',
-    ),
-    conditionalOperation(
-      'context.get_record',
-      'Requires the exact active Runtime binding and Run, plus a governed Context Pack with a delivered receipt.',
-    ),
-  ],
-  notes: [
-    'OpenWorker Desktop owns its process; Mu attaches to the verified local sidecar.',
-    'Workspace, session identity, approvals, and artifacts are validated before use.',
-  ],
-})
-
 const BUILTIN_ADAPTERS: Record<string, RuntimeGatewayAdapter> = {
   [codexRuntimeTypeID]: codex,
   [claudeCodeRuntimeTypeID]: claudeCode,
-  [openWorkerRuntimeTypeID]: openWorker,
 }
 
 export function adapterFor(endpoint: RuntimeEndpoint): RuntimeGatewayAdapter | undefined {

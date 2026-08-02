@@ -149,7 +149,6 @@ export interface ConversationHistoryAdapter {
 /** ConversationProvider values for the built-in providers. */
 export const CODE_PROVIDER: ConversationProvider = { rawValue: 'codex' }
 export const CLAUDE_CODE_PROVIDER: ConversationProvider = { rawValue: 'claude_code' }
-export const OPEN_WORKER_PROVIDER: ConversationProvider = { rawValue: 'openworker' }
 
 /** Canonical workspace path resolution with tilde expansion (Swift-style). */
 export function canonicalWorkspacePath(rawPath: string): string {

@@ -940,6 +940,45 @@ public struct LedgerEvent: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
+/// Safe, provider-neutral progress emitted by a native runtime. This is a
+/// receipt timeline, not a transcript of private chain-of-thought.
+public struct RuntimeActivityEvent: Codable, Hashable, Sendable {
+    public var id: String?
+    public var phase: String
+    public var status: String
+    public var title: String
+    public var detail: String?
+    public var toolName: String?
+    public var path: String?
+    public var command: String?
+    public var requestID: String?
+    public var artifactID: String?
+
+    public init(
+        id: String? = nil,
+        phase: String,
+        status: String,
+        title: String,
+        detail: String? = nil,
+        toolName: String? = nil,
+        path: String? = nil,
+        command: String? = nil,
+        requestID: String? = nil,
+        artifactID: String? = nil
+    ) {
+        self.id = id
+        self.phase = phase
+        self.status = status
+        self.title = title
+        self.detail = detail
+        self.toolName = toolName
+        self.path = path
+        self.command = command
+        self.requestID = requestID
+        self.artifactID = artifactID
+    }
+}
+
 public enum MuError: LocalizedError, Equatable {
     case database(String)
     case invalidRepository(String)

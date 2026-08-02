@@ -89,8 +89,9 @@ public struct ClaudeCodeStreamState:
     }
 }
 
-/// Parser for Claude Code's documented stream-json surface. Only visible text
-/// and terminal receipts are retained; thinking and tool internals are ignored.
+/// Parser for Claude Code's documented stream-json surface. Visible text and
+/// explicit tool/file receipts are retained; private thinking text is never
+/// copied into the activity detail.
 public final class ClaudeCodeStreamParser:
     @unchecked Sendable
 {
@@ -101,15 +102,20 @@ public final class ClaudeCodeStreamParser:
     private var assistantOrder: [String] = []
     private var state = ClaudeCodeStreamState()
     private let onVisibleText: @Sendable (String) -> Void
+    private let onActivity: @Sendable (RuntimeActivityEvent) -> Void
+    private var pendingActivities: [RuntimeActivityEvent] = []
 
     public init(
-        onVisibleText: @escaping @Sendable (String) -> Void = { _ in }
+        onVisibleText: @escaping @Sendable (String) -> Void = { _ in },
+        onActivity: @escaping @Sendable (RuntimeActivityEvent) -> Void = { _ in }
     ) {
         self.onVisibleText = onVisibleText
+        self.onActivity = onActivity
     }
 
     public func consume(_ data: Data) {
         var callbacks: [String] = []
+        var activities: [RuntimeActivityEvent] = []
         lock.withLock {
             buffer.append(data)
             while let newline = buffer.firstIndex(of: 0x0A) {
@@ -118,7 +124,12 @@ public final class ClaudeCodeStreamParser:
                 if let text = consumeLineUnlocked(line) {
                     callbacks.append(text)
                 }
-            }
+                }
+            activities = pendingActivities
+            pendingActivities.removeAll()
+        }
+        for activity in activities {
+            onActivity(activity)
         }
         for text in callbacks {
             onVisibleText(text)
@@ -127,12 +138,18 @@ public final class ClaudeCodeStreamParser:
 
     public func finish() -> ClaudeCodeStreamState {
         var callback: String?
+        var activities: [RuntimeActivityEvent] = []
         let result = lock.withLock {
             if !buffer.isEmpty {
                 callback = consumeLineUnlocked(buffer)
                 buffer.removeAll()
             }
+            activities = pendingActivities
+            pendingActivities.removeAll()
             return state
+        }
+        for activity in activities {
+            onActivity(activity)
         }
         if let callback {
             onVisibleText(callback)
@@ -142,8 +159,15 @@ public final class ClaudeCodeStreamParser:
 
     @discardableResult
     public func consumeLine(_ data: Data) -> String? {
+        var activities: [RuntimeActivityEvent] = []
         let callback = lock.withLock {
-            consumeLineUnlocked(data)
+            let result = consumeLineUnlocked(data)
+            activities = pendingActivities
+            pendingActivities.removeAll()
+            return result
+        }
+        for activity in activities {
+            onActivity(activity)
         }
         if let callback {
             onVisibleText(callback)
@@ -177,9 +201,19 @@ public final class ClaudeCodeStreamParser:
             return nil
 
         case "stream_event":
-            guard let event = object["event"] as? [String: Any],
-                  event["type"] as? String
-                    == "content_block_delta",
+            guard let event = object["event"] as? [String: Any] else {
+                return nil
+            }
+            if event["type"] as? String == "content_block_start",
+               let block = event["content_block"] as? [String: Any],
+               let activity = Self.runtimeActivity(
+                   from: block,
+                   status: "started"
+               ) {
+                pendingActivities.append(activity)
+                return nil
+            }
+            guard event["type"] as? String == "content_block_delta",
                   let delta = event["delta"] as? [String: Any],
                   let text = delta["text"] as? String,
                   !text.isEmpty else {
@@ -196,6 +230,16 @@ public final class ClaudeCodeStreamParser:
             if let model = Self.nonempty(message["model"]) {
                 state.model = model
             }
+            if let blocks = message["content"] as? [[String: Any]] {
+                for block in blocks {
+                    if let activity = Self.runtimeActivity(
+                        from: block,
+                        status: "updated"
+                    ) {
+                        pendingActivities.append(activity)
+                    }
+                }
+            }
             let messageID =
                 Self.nonempty(message["id"])
                 ?? "assistant-\(assistantOrder.count)"
@@ -209,6 +253,20 @@ public final class ClaudeCodeStreamParser:
             assistantTexts[messageID] = text
             partialText = ""
             return updateVisibleTextUnlocked()
+
+        case "user":
+            if let message = object["message"] as? [String: Any],
+               let blocks = message["content"] as? [[String: Any]] {
+                for block in blocks {
+                    if let activity = Self.runtimeActivity(
+                        from: block,
+                        status: "completed"
+                    ) {
+                        pendingActivities.append(activity)
+                    }
+                }
+            }
+            return nil
 
         case "result":
             let isError = object["is_error"] as? Bool == true
@@ -232,10 +290,80 @@ public final class ClaudeCodeStreamParser:
             return nil
 
         default:
-            // Tool, thinking, hook, and internal protocol events stay private
-            // to Claude Code and never become portable Project messages.
+            // Unknown provider events stay private.
             return nil
         }
+    }
+
+    private static func runtimeActivity(
+        from block: [String: Any],
+        status: String
+    ) -> RuntimeActivityEvent? {
+        let type = nonempty(block["type"])
+        let id = nonempty(block["id"])
+        if type == "thinking" {
+            return RuntimeActivityEvent(
+                id: id,
+                phase: "thinking",
+                status: status,
+                title: "Agent reasoning",
+                detail: "Claude Code reported a reasoning phase; private reasoning text is not copied into Mu."
+            )
+        }
+        guard type == "tool_use" || type == "tool_result" else {
+            return nil
+        }
+        let toolName = nonempty(block["name"]) ?? "tool"
+        let input = (block["input"] as? [String: Any])
+            ?? (block["content"] as? [String: Any])
+        let path = nonempty(
+            input?["file_path"]
+                ?? input?["path"]
+                ?? input?["filePath"]
+                ?? input?["pattern"]
+        ).map(Self.safeActivityText)
+        let command = nonempty(input?["command"] ?? input?["cmd"])
+            .map(Self.safeActivityText)
+        let fileTool = [
+            "read", "glob", "grep", "edit", "write", "multiedit", "notebook"
+        ].contains { toolName.lowercased().hasPrefix($0) }
+        let phase = fileTool ? "file" : "tool"
+        let verb: String
+        if status == "completed" {
+            verb = fileTool ? "Read" : "Used"
+        } else if status == "failed" {
+            verb = "Failed"
+        } else {
+            verb = fileTool ? "Reading" : "Using"
+        }
+        let target = path ?? (command.map { "`\($0)`" } ?? toolName)
+        return RuntimeActivityEvent(
+            id: nonempty(block["tool_use_id"]) ?? id,
+            phase: phase,
+            status: status,
+            title: verb + " " + target,
+            detail: command ?? (path == nil ? "Tool: " + toolName : nil),
+            toolName: toolName,
+            path: path,
+            command: command
+        )
+    }
+
+    private static func safeActivityText(_ value: String) -> String {
+        let redacted = value
+            .replacingOccurrences(
+                of: #"(?i)(sk|key|token|secret)[-_][A-Za-z0-9._-]+"#,
+                with: "[redacted]",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"(?i)Bearer\s+[A-Za-z0-9._-]+"#,
+                with: "Bearer [redacted]",
+                options: .regularExpression
+            )
+        return redacted.count > 240
+            ? String(redacted.prefix(237)) + "…"
+            : redacted
     }
 
     private func updateVisibleTextUnlocked() -> String? {
@@ -377,7 +505,9 @@ public final class ClaudeCodeClient:
         onSessionStarted:
             @escaping @Sendable (String) throws -> Void = { _ in },
         onVisibleText:
-            @escaping @Sendable (String) -> Void = { _ in }
+            @escaping @Sendable (String) -> Void = { _ in },
+        onActivity:
+            @escaping @Sendable (RuntimeActivityEvent) -> Void = { _ in }
     ) throws -> ClaudeCodeTurnResult {
         guard FileManager.default.isExecutableFile(
             atPath: executableURL.path
@@ -415,7 +545,8 @@ public final class ClaudeCodeClient:
         process.standardError = errorPipe
 
         let parser = ClaudeCodeStreamParser(
-            onVisibleText: onVisibleText
+            onVisibleText: onVisibleText,
+            onActivity: onActivity
         )
         let errorData = LockedClaudeData()
         let readers = DispatchGroup()
@@ -650,4 +781,3 @@ private final class LockedClaudeData:
         }
     }
 }
-

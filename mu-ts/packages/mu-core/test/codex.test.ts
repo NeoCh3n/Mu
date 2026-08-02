@@ -19,6 +19,25 @@ function client(): CodexAppServerClient {
 }
 
 describe('CodexAppServerClient protocol', () => {
+  it('warms the app-server once and shares it with the first turn', async () => {
+    const codex = client()
+    const task = createTaskRecord({
+      title: 'Warm endpoint',
+      objective: 'Verify the warmed app-server path',
+      repositoryPath: '/tmp/repo',
+    })
+    try {
+      await Promise.all([
+        codex.warm(),
+        codex.runReadOnlyTask({ task, clientUserMessageID: 'mu-warm' }),
+      ])
+      const candidates = await codex.listHistory('/tmp/repo')
+      expect(candidates).toHaveLength(1)
+    } finally {
+      codex.stop()
+    }
+  })
+
   it('probes the mock server', async () => {
     const codex = client()
     const result = await codex.probe()

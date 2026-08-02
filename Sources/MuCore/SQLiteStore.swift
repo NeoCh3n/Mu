@@ -3969,7 +3969,15 @@ public final class SQLiteStore {
     private func deleteRecord(kind: String, id: UUID) throws {
         lock.lock()
         defer { lock.unlock() }
-        let statement = try prepare("DELETE FROM records WHERE kind = ? AND id = ?;")
+        // UUIDs written by the TS control plane historically used lowercase
+        // strings while Swift's UUID.uuidString is uppercase. SQLite's
+        // default BINARY comparison made those records readable in a list but
+        // impossible to fetch or remove by UUID. Keep record identity
+        // case-insensitive at this boundary so both clients share the same
+        // persisted store.
+        let statement = try prepare(
+            "DELETE FROM records WHERE kind = ? AND id = ? COLLATE NOCASE;"
+        )
         defer { sqlite3_finalize(statement) }
         bind(kind, at: 1, in: statement)
         bind(id.uuidString, at: 2, in: statement)
@@ -3979,7 +3987,9 @@ public final class SQLiteStore {
     private func fetchRecord<T: Decodable>(kind: String, id: UUID, as type: T.Type) throws -> T? {
         lock.lock()
         defer { lock.unlock() }
-        let statement = try prepare("SELECT json FROM records WHERE kind = ? AND id = ?;")
+        let statement = try prepare(
+            "SELECT json FROM records WHERE kind = ? AND id = ? COLLATE NOCASE;"
+        )
         defer { sqlite3_finalize(statement) }
         bind(kind, at: 1, in: statement)
         bind(id.uuidString, at: 2, in: statement)
@@ -3999,8 +4009,8 @@ public final class SQLiteStore {
         lock.lock()
         defer { lock.unlock() }
         let sql = taskID == nil
-            ? "SELECT json FROM records WHERE kind = ? ORDER BY sort_at DESC;"
-            : "SELECT json FROM records WHERE kind = ? AND task_id = ? ORDER BY sort_at DESC;"
+            ? "SELECT id, json FROM records WHERE kind = ? ORDER BY sort_at DESC;"
+            : "SELECT id, json FROM records WHERE kind = ? AND task_id = ? ORDER BY sort_at DESC;"
         let statement = try prepare(sql)
         defer { sqlite3_finalize(statement) }
         bind(kind, at: 1, in: statement)
@@ -4010,8 +4020,23 @@ public final class SQLiteStore {
 
         var values: [T] = []
         while sqlite3_step(statement) == SQLITE_ROW {
-            guard let pointer = sqlite3_column_text(statement, 0) else { continue }
-            values.append(try decode(String(cString: pointer), as: type))
+            guard let idPointer = sqlite3_column_text(statement, 0),
+                  let jsonPointer = sqlite3_column_text(statement, 1) else {
+                continue
+            }
+            let id = String(cString: idPointer)
+            do {
+                values.append(try decode(String(cString: jsonPointer), as: type))
+            } catch {
+                throw MuError.database(
+                    "Could not decode "
+                        + kind
+                        + " record "
+                        + id
+                        + ": "
+                        + error.localizedDescription
+                )
+            }
         }
         return values
     }

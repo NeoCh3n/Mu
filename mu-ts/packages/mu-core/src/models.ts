@@ -15,6 +15,7 @@ import {
   type RuntimeInteractionKind,
   type RuntimeInteractionState,
   type RuntimeSessionState,
+  type ReasoningEffort,
   type RunPurpose,
   type RunState,
   type TaskStatus,
@@ -407,6 +408,8 @@ export interface RunRecord {
   readonly nativeThreadID?: string
   readonly nativeTurnID?: string
   readonly nativeOutput?: string
+  /** Resolved model/reasoning budget selected for this turn. */
+  readonly reasoningEffort?: ReasoningEffort
   readonly agentIdentityID?: UUID
   readonly createdAt: Date
   readonly updatedAt: Date
@@ -429,6 +432,7 @@ export function createRunRecord(params: {
   nativeThreadID?: string
   nativeTurnID?: string
   nativeOutput?: string
+  reasoningEffort?: ReasoningEffort
   agentIdentityID?: UUID
   createdAt?: Date
   updatedAt?: Date
@@ -451,6 +455,7 @@ export function createRunRecord(params: {
     nativeThreadID: params.nativeThreadID,
     nativeTurnID: params.nativeTurnID,
     nativeOutput: params.nativeOutput,
+    reasoningEffort: params.reasoningEffort,
     agentIdentityID: params.agentIdentityID,
     createdAt: now,
     updatedAt: params.updatedAt ?? now,
@@ -506,6 +511,85 @@ export function createRuntimeEndpoint(params: {
     nativeConfiguration: params.nativeConfiguration,
     instanceIdentity: params.instanceIdentity,
   }
+}
+
+/**
+ * Stable grouping key used by the UI and cleanup route. A discovered record
+ * is the same local instance when it reports the same identity or executable;
+ * otherwise the fallback is deliberately conservative and only groups exact
+ * runtime-type/display-name copies.
+ */
+export function runtimeEndpointIdentityKey(endpoint: RuntimeEndpoint): string {
+  const identity = endpoint.instanceIdentity
+  if (identity?.stableInstanceKey !== undefined) {
+    return `identity:${identity.provider.rawValue}:${identity.stableInstanceKey}`
+  }
+  const executable = endpoint.nativeConfiguration?.['executable']
+  if (executable !== undefined) {
+    return `executable:${endpoint.runtimeTypeID}:${executable}`
+  }
+  return `unidentified:${endpoint.runtimeTypeID}:${endpoint.displayName.trim().toLowerCase()}`
+}
+
+/**
+ * A runtime is useful once it is verified or carries concrete local evidence.
+ * The control plane may still derive an endpoint-scoped fallback identity for
+ * host calls, but that synthetic identity must not make a blank discovery look
+ * configured in the registry UI.
+ */
+export function hasRuntimeEndpointEvidence(endpoint: RuntimeEndpoint): boolean {
+  if (endpoint.status !== 'discovered') return true
+
+  const configuration = endpoint.nativeConfiguration ?? {}
+  const configuredValue = (key: string): boolean => {
+    const value = configuration[key]
+    return typeof value === 'string' && value.trim() !== ''
+  }
+  if (
+    configuredValue('executable')
+    || configuredValue('application_path')
+    || configuredValue('bundle_identifier')
+    || configuredValue('terminal_id')
+    || configuredValue('tty')
+    || Object.keys(configuration).some((key) => key.startsWith('identity.') && configuredValue(key))
+  ) return true
+
+  const identity = endpoint.instanceIdentity
+  if (identity === undefined) return false
+  if (identity.identityBasis !== 'installation') return true
+  if (
+    identity.executablePath !== undefined
+    || identity.terminalIdentifier !== undefined
+    || identity.nativeSource !== undefined
+    || identity.workspacePath !== undefined
+    || identity.surfaceKind === 'desktop_application'
+  ) return true
+  return identity.stableInstanceKey !== `${endpoint.runtimeTypeID}:${endpoint.id}`
+}
+
+/** A runtime is useful once it is verified or has enough local identity to configure. */
+export function isUsefulRuntimeEndpoint(endpoint: RuntimeEndpoint): boolean {
+  return hasRuntimeEndpointEvidence(endpoint)
+}
+
+/**
+ * Returns only the redundant low-confidence discoveries. One newest record per
+ * conservative identity group is retained, so cleanup cannot remove distinct
+ * terminals or desktop instances.
+ */
+export function duplicateDiscoveredRuntimeEndpointIDs(
+  endpoints: readonly RuntimeEndpoint[],
+): UUID[] {
+  const groups = new Map<string, RuntimeEndpoint[]>()
+  for (const endpoint of endpoints) {
+    if (endpoint.status !== 'discovered' || isUsefulRuntimeEndpoint(endpoint)) continue
+    const key = runtimeEndpointIdentityKey(endpoint)
+    groups.set(key, [...(groups.get(key) ?? []), endpoint])
+  }
+  return [...groups.values()].flatMap((items) => items
+    .sort((left, right) => right.lastProbedAt.getTime() - left.lastProbedAt.getTime())
+    .slice(1)
+    .map((endpoint) => endpoint.id))
 }
 
 // ---------------------------------------------------------------------------
@@ -756,4 +840,3 @@ export function createLedgerEvent(params: {
     occurredAt: params.occurredAt ?? new Date(),
   }
 }
-

@@ -10,8 +10,7 @@ extension ControlPlaneService {
             runtimeTypeID: Self.codexRuntimeTypeID,
             nativeAgentName: "Codex"
         )
-        guard let executable =
-            state.endpoint.nativeConfiguration?["executable"] else {
+        guard state.endpoint.nativeConfiguration?["executable"] != nil else {
             let error = MuError.commandFailed(
                 "Codex executable path is not registered."
             )
@@ -21,9 +20,7 @@ extension ControlPlaneService {
             )
             throw error
         }
-        let client = CodexAppServerClient(
-            executableURL: URL(fileURLWithPath: executable)
-        )
+        let client = try codexClient(for: state.endpoint)
         codexRuntimeLock.withLock {
             activeCodexClients[state.run.id] = client
         }
@@ -33,7 +30,6 @@ extension ControlPlaneService {
                     forKey: state.run.id
                 )
             }
-            client.stop()
         }
         let mirror = ClaudeCodeOutputMirror {
             [weak self] text, force in
@@ -57,24 +53,64 @@ extension ControlPlaneService {
                 + "\n\n# Current Project message\n\n"
                 + (state.entry.routedText
                     ?? state.entry.text)
-            let result = try client.runReadOnlyContinuation(
-                threadID: state.binding.nativeSessionID,
-                task: state.task,
-                prompt: prompt,
-                clientUserMessageID:
-                    state.entry.id.uuidString,
-                onTurnStarted: {
-                    [weak self] threadID, turnID in
-                    try self?.markManagedContinuationStarted(
-                        state: state,
-                        nativeSessionID: threadID,
-                        nativeTurnID: turnID
-                    )
-                },
-                onVisibleText: { text in
-                    mirror.offer(text)
+            let result: CodexTurnResult
+            do {
+                result = try client.runReadOnlyContinuation(
+                    threadID: state.binding.nativeSessionID,
+                    task: state.task,
+                    prompt: prompt,
+                    clientUserMessageID:
+                        state.entry.id.uuidString,
+                    onTurnStarted: {
+                        [weak self] threadID, turnID in
+                        try self?.markManagedContinuationStarted(
+                            state: state,
+                            nativeSessionID: threadID,
+                            nativeTurnID: turnID
+                        )
+                    },
+                    onVisibleText: { text in
+                        mirror.offer(text)
+                    }
+                )
+            } catch {
+                guard Self.isMissingCodexThreadError(error) else {
+                    throw error
                 }
-            )
+
+                // A persisted native thread can disappear when the Codex App
+                // Server is restarted or its state database is replaced. The
+                // Project message remains valid, so recover it exactly once by
+                // creating a replacement thread with the same bounded prompt.
+                let previousNativeSessionID = state.binding.nativeSessionID
+                result = try client.runReadOnlyTask(
+                    task: state.task,
+                    agent: nil,
+                    promptOverride: prompt,
+                    clientUserMessageID:
+                        state.entry.id.uuidString,
+                    onThreadStarted: {
+                        [weak self] nativeSessionID in
+                        try self?.markManagedContinuationSessionReplaced(
+                            state: state,
+                            previousNativeSessionID:
+                                previousNativeSessionID,
+                            nativeSessionID: nativeSessionID
+                        )
+                    },
+                    onTurnStarted: {
+                        [weak self] threadID, turnID in
+                        try self?.markManagedContinuationStarted(
+                            state: state,
+                            nativeSessionID: threadID,
+                            nativeTurnID: turnID
+                        )
+                    },
+                    onVisibleText: { text in
+                        mirror.offer(text)
+                    }
+                )
+            }
             mirror.finish(result.output)
             try completeManagedContinuation(
                 state: state,
@@ -437,15 +473,17 @@ extension ControlPlaneService {
         nativeSessionID: String,
         nativeTurnID: String
     ) throws {
-        guard nativeSessionID
-                == state.binding.nativeSessionID,
+        guard !nativeSessionID.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).isEmpty,
               var run = try store.fetchRun(
                   id: state.run.id
               ),
               var binding =
                 try store.fetchRuntimeSessionBinding(
                     id: state.binding.id
-                ) else {
+                ),
+              binding.nativeSessionID == nativeSessionID else {
             throw MuError.invalidTransition(
                 "\(state.nativeAgentName) returned a conflicting session identity."
             )
@@ -474,6 +512,75 @@ extension ControlPlaneService {
                     "\(state.nativeAgentName)|\(nativeSessionID)|\(nativeTurnID)"
             )
         }
+    }
+
+    private func markManagedContinuationSessionReplaced(
+        state: ManagedContinuationState,
+        previousNativeSessionID: String,
+        nativeSessionID: String
+    ) throws {
+        let previousID = previousNativeSessionID.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let replacementID = nativeSessionID.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !previousID.isEmpty,
+              !replacementID.isEmpty,
+              previousID != replacementID,
+              var run = try store.fetchRun(id: state.run.id),
+              var binding = try store.fetchRuntimeSessionBinding(
+                  id: state.binding.id
+              ),
+              binding.nativeSessionID == previousID else {
+            throw MuError.invalidTransition(
+                "\(state.nativeAgentName) returned a conflicting replacement session identity."
+            )
+        }
+
+        run.nativeThreadID = replacementID
+        run.nativeTurnID = nil
+        run.updatedAt = Date()
+        binding.nativeSessionID = replacementID
+        binding.state = .connecting
+        binding.lastActivitySummary =
+            "\(state.nativeAgentName) replaced an unavailable native thread."
+        binding.lastError = nil
+        binding.updatedAt = Date()
+        try store.withTransaction {
+            try store.upsertRun(run)
+            try store.upsertRuntimeSessionBinding(binding)
+            try store.appendEvent(
+                LedgerEvent(
+                    projectID: state.kernel.project.id,
+                    actorID: run.actorID,
+                    principalID: run.principalID,
+                    workspaceID: state.kernel.workspace.id,
+                    taskID: state.task.id,
+                    runID: run.id,
+                    type: "codex.thread.replaced",
+                    summary:
+                        "Codex replaced an unavailable native Project thread.",
+                    payload: [
+                        "previous_native_thread_id": previousID,
+                        "native_thread_id": replacementID,
+                        "reason": "thread_not_found"
+                    ]
+                )
+            )
+        }
+    }
+
+    private static func isMissingCodexThreadError(_ error: Error) -> Bool {
+        let message = [
+            error.localizedDescription,
+            String(describing: error)
+        ]
+        .joined(separator: " ")
+        .lowercased()
+        return message.contains("thread not found")
+            || message.contains("thread_not_found")
+            || message.contains("unknown thread")
     }
 
     private func completeManagedContinuation(
