@@ -1,21 +1,56 @@
 # Mu
 
-Mu is a local-first Project OS and runtime control plane for human–Agent
-collaboration. Codex, Claude Code, OpenWorker, and future Agents participate
-in Mu-owned Projects; their private Runtime state never becomes the Project's
-source of truth.
+### A local-first control plane for real agent work
 
-The macOS app is a native SwiftUI application backed by SQLite and a local
-content-addressed evidence store. Its Project Kernel owns Project, Principal,
-Actor, Membership, Delegation, Task, Lease, Workspace, Event, Artifact, Review,
-and Approval records. Runtime Gateway adapters expose capability-probed control
-without flattening unlike vendor protocols into one fictional API.
+Mu gives developers one durable Project workspace for work that may move between
+Codex, Claude Code, OpenWorker, and future Agent hosts. It keeps the Project's
+truth, permissions, Context Packs, evidence, and history under Mu's control
+while each vendor Runtime keeps its own native state.
 
-Mu 0.8 provides runtime-independent Agent identities and a shared macOS Project
-workbench. Every Project exposes Chat, Files, Browser, Terminal snapshots, and
-Artifacts regardless of the selected runtime. Atlas, Forge, Lens, Scout, and Relay
-are illustrative Mu work profiles; the actual runtime endpoint and provenance stay
-visible beside the identity.
+Mu is built for the moment when a task outgrows one chat window:
+
+- **Route work explicitly.** Mention **@Codex**, **@Claude**, **@OpenWorker**, or a
+  named Agent and Mu sends one bounded Project message to the verified endpoint.
+- **Keep context portable.** Import local history as reviewable Raw Sources,
+  select what becomes accepted Context, and deliver a fresh, bounded Context
+  Pack to the next Runtime.
+- **Make identity visible.** Codex Desktop, Codex CLI, Claude Code terminals,
+  and other endpoints remain distinct through persisted instance identity.
+- **Keep humans in control.** Local state is durable and auditable; read-only
+  defaults, exact-workspace checks, leases, approvals, and evidence receipts
+  make the integration boundary explicit.
+
+## Current verified scope
+
+| Area | What is implemented and verified |
+| --- | --- |
+| **macOS app** | Native SwiftUI Project workbench backed by SQLite and a local content-addressed evidence store. |
+| **Codex** | Official stdio App Server adapter with account/thread probing, read-only turns, continuations, cancellation, history discovery, and persisted native IDs. |
+| **Claude Code** | Local **stream-json** CLI adapter with bounded read-only execution, visible streaming, interruption, and local history support. |
+| **OpenWorker** | Existing native macOS compatibility path with exact-workspace session binding and synchronized artifacts; it is not part of the TypeScript P0 control plane. |
+| **Continuity** | Provider-neutral conversation records, exact canonical workspace matching, human-selected imports, bounded Context Packs, CAS rendering, and delivery receipts. |
+| **Project UI** | Expandable Projects, endpoint/terminal-aware Agents, Markdown chat, history progress, Context state, and Files/Browser/Terminal/Review surfaces. |
+| **TypeScript rewrite** | Schema-compatible **mu-ts** control plane, Fastify API/SSE server, React UI, local Codex + Claude Code hosts, and endpoint-scoped routing. |
+
+The current build is intentionally honest about its boundary. QM is an
+experimental bridge tested against Mu's mock contract, not an upstream QM
+acceptance. Pi is a future adapter candidate, not a live Runtime in this
+release. Mu does not claim vendor workspace writes or Runtime approval
+interception where the adapter has not proved those capabilities.
+
+## Why Mu
+
+Mu is not a chat wrapper that merges several vendor transcripts into one
+unbounded prompt. It is a control plane that lets a Project survive a Runtime
+change without losing provenance:
+
+1. **Discover** the local endpoints and their real identity.
+2. **Route** a task through the capability-probed host the user selected.
+3. **Review** imported history and accept only the records that belong in the
+   Project.
+4. **Deliver** a bounded Context Pack with workspace, actor, policy, lease, and
+   receipt metadata.
+5. **Audit** the resulting chat, artifacts, ledger events, and native session IDs.
 
 The macOS UI calls the long-lived folder-backed container a **Project**. Existing
 persistence and adapter contracts retain the internal `TaskRecord` name for backward
@@ -129,7 +164,7 @@ migration phases are implemented and tested:
 ```sh
 cd mu-ts
 pnpm install
-pnpm -r test        # 189 tests
+pnpm -r test        # run all package suites
 pnpm -r typecheck
 pnpm --filter @mu/ui build       # build the web UI once
 pnpm --filter @mu/server start   # one process = the whole app
