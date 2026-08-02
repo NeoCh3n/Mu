@@ -293,6 +293,10 @@ private struct WorkspaceChatSurface: View {
         store.sessionBindings(for: task.id)
     }
 
+    private var interruptibleRun: RunRecord? {
+        store.interruptibleRun(for: task.id)
+    }
+
     private var openWorkerBindings:
         [RuntimeSessionBinding] {
         bindings.filter {
@@ -566,6 +570,25 @@ private struct WorkspaceChatSurface: View {
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(1...5)
                     .onSubmit(send)
+                    if interruptibleRun != nil {
+                        Button(role: .destructive) {
+                            store.interruptCurrentRun(taskID: task.id)
+                        } label: {
+                            Label(
+                                store.interfaceLanguage == .simplifiedChinese
+                                    ? "中断"
+                                    : "Interrupt",
+                                systemImage: "stop.fill"
+                            )
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                        .help(
+                            store.interfaceLanguage == .simplifiedChinese
+                                ? "立即中断当前 Runtime 任务，已产生的内容会保留。"
+                                : "Interrupt the current Runtime turn; existing output is preserved."
+                        )
+                    }
                     Button(action: send) {
                         Label(
                             selectedRuntime == nil ? "Note" : "Run",

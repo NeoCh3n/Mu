@@ -1003,6 +1003,66 @@ final class AppStore: ObservableObject {
         runs.filter { $0.taskID == taskID }.sorted { $0.createdAt > $1.createdAt }
     }
 
+    /// Returns the current native execution when Mu can send a real interrupt
+    /// to its Runtime. Codex needs both native identifiers; Claude Code can be
+    /// interrupted as soon as its Mu-launched process is registered.
+    func interruptibleRun(for taskID: UUID) -> RunRecord? {
+        guard let task = task(id: taskID),
+              let runID = task.currentRunID,
+              let run = runs.first(where: { $0.id == runID }),
+              run.purpose == .execution,
+              run.state == .starting || run.state == .active,
+              let endpoint = endpoint(id: run.endpointID) else {
+            return nil
+        }
+        switch endpoint.runtimeTypeID {
+        case ControlPlaneService.codexRuntimeTypeID:
+            guard run.nativeThreadID != nil,
+                  run.nativeTurnID != nil else {
+                return nil
+            }
+        case ControlPlaneService.claudeCodeRuntimeTypeID:
+            guard dispatchingRunIDs.contains(run.id) else { return nil }
+        case ControlPlaneService.openWorkerRuntimeTypeID:
+            guard runtimeSessionBindings.contains(where: {
+                $0.taskID == taskID
+                    && $0.runID == run.id
+                    && ($0.state == .working || $0.state == .awaitingApproval)
+            }) else {
+                return nil
+            }
+        default:
+            return nil
+        }
+        return run
+    }
+
+    func interruptCurrentRun(taskID: UUID) {
+        guard let run = interruptibleRun(for: taskID),
+              let endpoint = endpoint(id: run.endpointID) else {
+            errorMessage = "No interruptible Runtime turn is currently active."
+            return
+        }
+        switch endpoint.runtimeTypeID {
+        case ControlPlaneService.codexRuntimeTypeID:
+            interruptCodex(run)
+        case ControlPlaneService.claudeCodeRuntimeTypeID:
+            interruptClaudeCode(run)
+        case ControlPlaneService.openWorkerRuntimeTypeID:
+            guard let binding = runtimeSessionBindings.first(where: {
+                $0.taskID == taskID
+                    && $0.runID == run.id
+                    && ($0.state == .working || $0.state == .awaitingApproval)
+            }) else {
+                errorMessage = "The active OpenWorker session could not be found."
+                return
+            }
+            interruptOpenWorker(binding)
+        default:
+            errorMessage = "This Runtime does not support interruption."
+        }
+    }
+
     func checkpoints(for taskID: UUID) -> [CheckpointRecord] {
         checkpoints.filter { $0.taskID == taskID }.sorted { $0.createdAt > $1.createdAt }
     }
