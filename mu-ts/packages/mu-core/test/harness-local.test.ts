@@ -214,6 +214,45 @@ describe('LocalChildProcessHarness', () => {
     expect(terminal.result.status).toBe('success')
   })
 
+  it('recreates a Codex thread when a persisted continuation is missing', async () => {
+    let continuationAttempts = 0
+    let replacementThreads = 0
+    const client = fakeCodexClient({
+      async runReadOnlyContinuation() {
+        continuationAttempts += 1
+        throw new Error('Command failed: turn/start: thread not found: stale-thread')
+      },
+      async runReadOnlyTask(params) {
+        replacementThreads += 1
+        params.onThreadStarted?.('thread-replacement')
+        params.onTurnStarted?.('thread-replacement', 'turn-replacement')
+        params.onVisibleText?.('Recovered analysis.')
+        return {
+          threadID: 'thread-replacement',
+          turnID: 'turn-replacement',
+          output: 'Recovered analysis.',
+          status: 'completed',
+          historyReconciled: true,
+        }
+      },
+    })
+    const harness = createLocalHarness({ codexClient: client })
+    const events = await collect(harness, {
+      provider: CODE_PROVIDER,
+      task: task(),
+      contextPack: contextPack(),
+      resumeSessionID: 'stale-thread',
+    })
+
+    expect(continuationAttempts).toBe(1)
+    expect(replacementThreads).toBe(1)
+    expect(events[0]).toEqual({ kind: 'session_started', sessionID: 'thread-replacement' })
+    const terminal = events.at(-1) as { kind: 'completed'; result: HarnessTurnResult }
+    expect(terminal.kind).toBe('completed')
+    expect(terminal.result.status).toBe('success')
+    expect(terminal.result.sessionID).toBe('thread-replacement')
+  })
+
   it('maps an interrupted Codex turn to cancelled', async () => {
     const harness = createLocalHarness({
       codexClient: fakeCodexClient({

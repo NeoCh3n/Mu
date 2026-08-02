@@ -562,9 +562,11 @@ export class LocalChildProcessHarness implements Harness {
     const queue = new EventQueue<HarnessTurnEvent>()
     const clientUserMessageID = `mu-${uuid()}`
     let pending: Promise<CodexTurnResult>
+    const onVisibleText = (text: string) => queue.push({ kind: 'visible_text', text })
+    const onActivity = (activity: HarnessActivityEvent) => queue.push({ kind: 'activity', activity })
 
     if (input.resumeSessionID !== undefined && input.resumeSessionID.trim() !== '') {
-      pending = client.runReadOnlyContinuation({
+      const continuation = client.runReadOnlyContinuation({
         threadID: input.resumeSessionID.trim(),
         task: requireTask(input),
         prompt:
@@ -575,8 +577,29 @@ export class LocalChildProcessHarness implements Harness {
           this.activeCodex.set(endpointKey, { threadID, turnID })
           queue.push({ kind: 'session_started', sessionID: threadID })
         },
-        onVisibleText: (text) => queue.push({ kind: 'visible_text', text }),
-        onActivity: (activity) => queue.push({ kind: 'activity', activity }),
+        onVisibleText,
+        onActivity,
+      })
+      pending = continuation.catch((error) => {
+        if (!isMissingCodexThreadError(error)) throw error
+
+        // A persisted native thread may disappear when the Codex App Server
+        // restarts or its state database changes. Recreate one thread once and
+        // replay the same bounded Project prompt; the service persists the new
+        // session_started event and binding identity through the normal path.
+        return client.runReadOnlyTask({
+          task: requireTask(input),
+          contextPack: requireContextPack(input),
+          promptOverride: input.promptOverride,
+          reasoningEffort: input.reasoningEffort,
+          clientUserMessageID,
+          onThreadStarted: (threadID) => queue.push({ kind: 'session_started', sessionID: threadID }),
+          onTurnStarted: (threadID, turnID) => {
+            this.activeCodex.set(endpointKey, { threadID, turnID })
+          },
+          onVisibleText,
+          onActivity,
+        })
       })
     } else {
       pending = client.runReadOnlyTask({
@@ -675,6 +698,13 @@ function mapCodexResult(result: CodexTurnResult): HarnessTurnResult {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function isMissingCodexThreadError(error: unknown): boolean {
+  const message = errorMessage(error).toLowerCase()
+  return message.includes('thread not found')
+    || message.includes('thread_not_found')
+    || message.includes('unknown thread')
 }
 
 export function createLocalHarness(
