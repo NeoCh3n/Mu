@@ -43,7 +43,7 @@ function header(request: FastifyRequest, name: string): string | undefined {
   return Array.isArray(value) ? value[0] : value
 }
 
-function principalFor(request: FastifyRequest): CollaborationPrincipal {
+export function principalFor(request: FastifyRequest): CollaborationPrincipal {
   const actorHeader = header(request, 'x-mu-actor-id')
   if (actorHeader !== undefined && !isUUID(actorHeader)) {
     throw MuError.invalidTransition('x-mu-actor-id must be a UUID.')
@@ -190,4 +190,3 @@ export function registerCollaborationRoutes(app: FastifyInstance, ctx: RouteCont
     return { removed: true }
   })
 }
-

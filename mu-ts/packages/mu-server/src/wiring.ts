@@ -148,6 +148,16 @@ export function buildApp(config: MuAppConfig): MuApp {
     now,
     onEnvelope: (envelope) => hub.publish(envelope.event, envelope.data),
   })
+  // Project ids are also deterministic Space ids. Backfill rooms for older
+  // databases so every existing Project immediately has one shared room.
+  for (const project of service.listProjects()) {
+    collaboration.ensureSpace({
+      id: project.id,
+      displayName: project.displayName,
+      description: project.repositoryPath === undefined ? '' : project.repositoryPath,
+      createdByActorID: project.ownerPrincipalID,
+    })
+  }
 
   // Warm long-lived local hosts in the background so a new Project does not
   // pay for app-server process creation and protocol initialization.

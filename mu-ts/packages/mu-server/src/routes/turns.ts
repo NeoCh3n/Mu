@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
-import type { RunRecord } from '@mu/core'
+import { isUUID, stableId, uuid, type ChatEntry, type CollaborationPrincipal, type RunRecord } from '@mu/core'
 import type { RouteContext } from './index.ts'
+import { principalFor } from './collaboration.ts'
 
 interface TurnBody {
   readonly text: string
@@ -24,9 +25,50 @@ interface InterruptBody {
  */
 export function startTurn(
   ctx: RouteContext,
-  params: { taskID: string; text: string; endpointID?: string; promptOverride?: string; sessionID?: string; resumeSessionID?: string; contextPackID?: string; contextRecordIDs?: readonly string[]; reasoningEffort?: string },
+  params: { taskID: string; text: string; endpointID?: string; promptOverride?: string; sessionID?: string; resumeSessionID?: string; contextPackID?: string; contextRecordIDs?: readonly string[]; reasoningEffort?: string; principal: CollaborationPrincipal },
 ): Promise<RunRecord> {
   const { service, hub } = ctx
+
+  function appendSpaceMessage(entry: Pick<ChatEntry, 'id' | 'taskID' | 'runID' | 'agentIdentityID' | 'authorKind' | 'authorName' | 'text'>): void {
+    const task = service.fetchTask(entry.taskID as never)
+    const rawSpaceID = task?.workspaceID ?? task?.projectID
+    if (rawSpaceID === undefined || !isUUID(rawSpaceID)) return
+    const spaceID = uuid(rawSpaceID)
+    const project = task?.projectID === undefined ? undefined : service.listProjects().find((candidate) => candidate.id === task.projectID)
+    ctx.collaboration.ensureSpace({
+      id: spaceID,
+      displayName: project?.displayName ?? task?.title ?? 'Shared Mu room',
+      description: project?.repositoryPath,
+      createdByActorID: params.principal.actorID,
+    })
+    const agentPrincipal: CollaborationPrincipal = entry.agentIdentityID === undefined
+      ? params.principal
+      : {
+        actorID: entry.agentIdentityID,
+        clientInstanceID: `agent-${entry.agentIdentityID}`,
+        displayName: entry.authorName,
+      }
+    try {
+      ctx.collaboration.appendEvent({
+        spaceID,
+        threadID: entry.taskID as never,
+        eventType: 'thread.message',
+        payload: {
+          taskID: entry.taskID,
+          runID: entry.runID ?? '',
+          authorKind: entry.authorKind,
+          authorName: entry.authorName,
+          text: entry.text.length > 7_900 ? `${entry.text.slice(0, 7_900)}\n[…truncated in shared event]` : entry.text,
+        },
+        idempotencyKey: `chat:${entry.id}`,
+        principal: agentPrincipal,
+      })
+    } catch {
+      // Shared projection is non-blocking; the task's canonical chat remains
+      // authoritative if a projection cannot be written.
+    }
+  }
+
   return new Promise<RunRecord>((resolve, reject) => {
     let settled = false
     let createdRun: RunRecord | undefined
@@ -37,6 +79,15 @@ export function startTurn(
         settled = true
         createdRun = data.run
         unsubscribe()
+        appendSpaceMessage({
+          id: stableId('mu.collaboration.turn-user', [data.run.id]),
+          taskID: data.run.taskID,
+          runID: data.run.id,
+          agentIdentityID: undefined,
+          authorKind: 'user',
+          authorName: params.principal.displayName,
+          text: params.text,
+        })
         resolve(data.run)
       }
     })
@@ -56,6 +107,9 @@ export function startTurn(
     void (async () => {
       try {
         for await (const event of iterator) {
+          if (event.kind === 'chat_entry' && event.chatEntry !== undefined) {
+            appendSpaceMessage(event.chatEntry)
+          }
           if (settled) {
             hub.publish('turn_event', { taskID: params.taskID, event })
           }
@@ -105,6 +159,7 @@ export function registerTurnsRoutes(app: FastifyInstance, ctx: RouteContext): vo
       contextPackID: body.contextPackID,
       contextRecordIDs: body.contextRecordIDs,
       reasoningEffort: body.reasoningEffort as never,
+      principal: principalFor(request),
     })
     return { runID: run.id, taskID: run.taskID, state: run.state }
   })

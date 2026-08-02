@@ -144,11 +144,13 @@ export class CollaborationService {
   }
 
   createSpace(params: {
+    id?: UUID
     displayName: string
     description?: string
     createdByActorID?: UUID
   }): CollaborationSpace {
     const space = createCollaborationSpace({
+      id: params.id,
       displayName: boundedText(params.displayName, 'Space name', 160),
       description: params.description?.trim().slice(0, 2_000),
       createdByActorID: params.createdByActorID,
@@ -163,12 +165,43 @@ export class CollaborationService {
     return space
   }
 
+  /** Creates the deterministic Project-backed room when it does not exist. */
+  ensureSpace(params: {
+    id: UUID
+    displayName: string
+    description?: string
+    createdByActorID?: UUID
+  }): CollaborationSpace {
+    return this.fetchSpace(params.id) ?? this.createSpace(params)
+  }
+
   listSpaces(): CollaborationSpace[] {
     return this.store.fetchRecords<CollaborationSpace>('collaboration_space')
   }
 
   fetchSpace(spaceID: UUID): CollaborationSpace | undefined {
     return this.store.fetchRecord<CollaborationSpace>('collaboration_space', spaceID)
+  }
+
+  renameSpace(spaceID: UUID, displayName: string): CollaborationSpace {
+    const current = this.fetchSpace(spaceID)
+    if (current === undefined) throw MuError.recordNotFound(`Collaboration Space ${spaceID}`)
+    const renamed: CollaborationSpace = {
+      ...current,
+      displayName: boundedText(displayName, 'Space name', 160),
+      version: current.version + 1,
+      updatedAt: this.now(),
+    }
+    this.store.upsertRecord({ kind: 'collaboration_space', id: renamed.id, sortAt: renamed.updatedAt, value: renamed })
+    return renamed
+  }
+
+  archiveSpace(spaceID: UUID): CollaborationSpace {
+    const current = this.fetchSpace(spaceID)
+    if (current === undefined) throw MuError.recordNotFound(`Collaboration Space ${spaceID}`)
+    const archived: CollaborationSpace = { ...current, status: 'archived', version: current.version + 1, updatedAt: this.now() }
+    this.store.upsertRecord({ kind: 'collaboration_space', id: archived.id, sortAt: archived.updatedAt, value: archived })
+    return archived
   }
 
   appendEvent(input: AppendSpaceEventInput): AppendSpaceEventResult {

@@ -114,11 +114,34 @@ describe('Mu HTTP API', () => {
     }
   })
 
+  it('keeps a Project-backed Space aligned through rename and archive', async () => {
+    const { mu, cleanup } = makeApp()
+    try {
+      const created = await mu.app.inject({ method: 'POST', url: '/projects', payload: { displayName: 'Shared Project' } })
+      const projectID = created.json<{ project: { id: string } }>().project.id
+      const initial = await mu.app.inject({ method: 'GET', url: '/spaces' })
+      expect(initial.json<{ spaces: Array<{ id: string; displayName: string; status: string }> }>().spaces)
+        .toEqual(expect.arrayContaining([expect.objectContaining({ id: projectID, displayName: 'Shared Project', status: 'active' })]))
+
+      await mu.app.inject({ method: 'PATCH', url: `/projects/${projectID}`, payload: { displayName: 'Renamed Project' } })
+      const renamed = await mu.app.inject({ method: 'GET', url: '/spaces' })
+      expect(renamed.json<{ spaces: Array<{ id: string; displayName: string }> }>().spaces)
+        .toEqual(expect.arrayContaining([expect.objectContaining({ id: projectID, displayName: 'Renamed Project' })]))
+
+      await mu.app.inject({ method: 'DELETE', url: `/projects/${projectID}` })
+      const archived = await mu.app.inject({ method: 'GET', url: '/spaces' })
+      expect(archived.json<{ spaces: Array<{ id: string; status: string }> }>().spaces)
+        .toEqual(expect.arrayContaining([expect.objectContaining({ id: projectID, status: 'archived' })]))
+    } finally {
+      cleanup()
+    }
+  })
+
   it('runs a full turn over the API and persists chat', async () => {
     const { mu, cleanup } = makeApp()
     try {
       const { app } = mu
-      const { taskID } = await seedProjectAndTask(app)
+      const { projectID, taskID } = await seedProjectAndTask(app)
 
       const turnResponse = await app.inject({
         method: 'POST',
@@ -140,6 +163,14 @@ describe('Mu HTTP API', () => {
       expect(entries).toHaveLength(2)
       expect(entries.find((e) => e.authorKind === 'user')?.text).toBe('Analyze the renderer.')
       expect(entries.find((e) => e.authorKind === 'agent')?.text).toContain('ship it')
+
+      // The Project-backed Space receives both sides of the conversation;
+      // another Mu client can replay this ordered stream independently.
+      const shared = await app.inject({ method: 'GET', url: `/spaces/${projectID}/sync` })
+      const sharedEvents = shared.json<{ events: Array<{ eventType: string; payload: Record<string, string> }> }>().events
+      expect(sharedEvents).toHaveLength(2)
+      expect(sharedEvents.map((event) => event.payload.authorKind)).toEqual(['user', 'agent'])
+      expect(sharedEvents[0]?.payload.text).toBe('Analyze the renderer.')
 
       // Runs + ledger endpoints.
       const runs = await app.inject({ method: 'GET', url: `/tasks/${taskID}/runs` })
