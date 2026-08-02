@@ -3,7 +3,8 @@ import Foundation
 extension ControlPlaneService {
     @discardableResult
     public func dispatchClaudeCodeTask(
-        runID: UUID
+        runID: UUID,
+        workspaceEntryID: UUID? = nil
     ) throws -> ClaudeCodeTurnResult {
         guard var run = try store.fetchRun(id: runID),
               var task = try store.fetchTask(id: run.taskID)
@@ -11,6 +12,20 @@ extension ControlPlaneService {
             throw MuError.recordNotFound(
                 "Claude Code execution Run \(runID)"
             )
+        }
+        var workspaceEntry = try workspaceEntryID.flatMap {
+            try store.fetchChatEntry(id: $0)
+        }
+        if let workspaceEntry {
+            guard workspaceEntry.taskID == task.id,
+                  workspaceEntry.targetEndpointID == run.endpointID,
+                  workspaceEntry.runID == run.id,
+                  workspaceEntry.runtimeSessionBindingID == nil,
+                  workspaceEntry.deliveryState == .awaitingSession else {
+                throw MuError.invalidTransition(
+                    "The Claude Code Workspace message is not waiting for its initial session."
+                )
+            }
         }
         guard run.purpose == .execution else {
             throw MuError.invalidTransition(
@@ -71,6 +86,15 @@ extension ControlPlaneService {
             runtimeBindingID: bindingID,
             taskLeaseID: lease.id
         )
+        let promptPreferences = runtimePromptPreferences
+        let initialPrompt = RuntimePromptPreferences.taskPrompt(
+            contextPack: contextPack.renderedMarkdown,
+            projectMessage: workspaceEntry.map {
+                $0.routedText ?? $0.text
+            },
+            additionalInstructions:
+                promptPreferences.claudeCodeAdditionalInstructions
+        )
         let sessionID = UUID().uuidString.lowercased()
         let turnID = UUID().uuidString.lowercased()
         var binding = RuntimeSessionBinding(
@@ -104,6 +128,13 @@ extension ControlPlaneService {
             authorName: "Claude Code",
             text: "Starting Claude Code…"
         )
+        if var entry = workspaceEntry {
+            entry.runtimeSessionBindingID = bindingID
+            entry.nativeMessageIndexLowerBound = binding.lastSyncedMessageCount
+            entry.deliveryState = .sending
+            entry.updatedAt = Date()
+            workspaceEntry = entry
+        }
         let persistentRunID = run.id
         let persistentBindingID = binding.id
         run.projectID = kernel.project.id
@@ -127,6 +158,9 @@ extension ControlPlaneService {
                 try store.upsertRun(run)
                 try store.upsertTask(task)
                 try store.upsertRuntimeSessionBinding(binding)
+                if let workspaceEntry {
+                    try store.upsertChatEntry(workspaceEntry)
+                }
                 try store.insertChatEntry(responseEntry)
                 try store.appendEvent(
                     LedgerEvent(
@@ -194,8 +228,9 @@ extension ControlPlaneService {
                 task: task,
                 contextPack: contextPack,
                 sessionID: sessionID,
-                promptOverride:
-                    contextPack.renderedMarkdown,
+                promptOverride: initialPrompt,
+                additionalSystemPrompt:
+                    promptPreferences.claudeCodeAdditionalInstructions,
                 onSessionStarted: {
                     [weak self] nativeSessionID in
                     guard let self else { return }
@@ -270,6 +305,17 @@ extension ControlPlaneService {
                 ? .cancelled
                 : .mirrored
             finalEntry.updatedAt = Date()
+            var finalWorkspaceEntry: ChatEntry?
+            if var workspaceEntry = workspaceEntryID.flatMap({
+                try? store.fetchChatEntry(id: $0)
+            }) ?? workspaceEntry {
+                workspaceEntry.runtimeSessionBindingID = binding.id
+                workspaceEntry.deliveryState = result.status == "cancelled"
+                    ? .cancelled
+                    : .delivered
+                workspaceEntry.updatedAt = Date()
+                finalWorkspaceEntry = workspaceEntry
+            }
             let artifact = try submitRuntimeOutputArtifact(
                 taskID: task.id,
                 producerActorID: kernel.actor?.id,
@@ -296,6 +342,9 @@ extension ControlPlaneService {
                 try store.upsertRun(run)
                 try store.upsertTask(task)
                 try store.upsertRuntimeSessionBinding(binding)
+                if let workspaceEntry = finalWorkspaceEntry {
+                    try store.upsertChatEntry(workspaceEntry)
+                }
                 try store.upsertChatEntry(finalEntry)
                 try store.appendEvent(
                     LedgerEvent(
@@ -354,10 +403,22 @@ extension ControlPlaneService {
                 "Claude Code failed: \(error.localizedDescription)"
             failedEntry.deliveryState = .failed
             failedEntry.updatedAt = Date()
+            var failedWorkspaceEntry: ChatEntry?
+            if var workspaceEntry = workspaceEntryID.flatMap({
+                try? store.fetchChatEntry(id: $0)
+            }) ?? workspaceEntry {
+                workspaceEntry.runtimeSessionBindingID = binding.id
+                workspaceEntry.deliveryState = .failed
+                workspaceEntry.updatedAt = Date()
+                failedWorkspaceEntry = workspaceEntry
+            }
             try? store.withTransaction {
                 try store.upsertRun(run)
                 try store.upsertTask(task)
                 try store.upsertRuntimeSessionBinding(binding)
+                if let workspaceEntry = failedWorkspaceEntry {
+                    try store.upsertChatEntry(workspaceEntry)
+                }
                 try store.upsertChatEntry(failedEntry)
                 try store.appendEvent(
                     LedgerEvent(

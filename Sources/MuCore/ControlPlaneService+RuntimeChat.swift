@@ -48,11 +48,14 @@ extension ControlPlaneService {
                 packID: state.contextPack.id,
                 status: .prepared
             )
-            let prompt =
-                state.contextPack.renderedMarkdown
-                + "\n\n# Current Project message\n\n"
-                + (state.entry.routedText
-                    ?? state.entry.text)
+            let promptPreferences = runtimePromptPreferences
+            let prompt = RuntimePromptPreferences.taskPrompt(
+                contextPack: state.contextPack.renderedMarkdown,
+                projectMessage: state.entry.routedText
+                    ?? state.entry.text,
+                additionalInstructions:
+                    promptPreferences.codexAdditionalInstructions
+            )
             let result: CodexTurnResult
             do {
                 result = try client.runReadOnlyContinuation(
@@ -87,6 +90,8 @@ extension ControlPlaneService {
                     task: state.task,
                     agent: nil,
                     promptOverride: prompt,
+                    additionalInstructions:
+                        promptPreferences.codexAdditionalInstructions,
                     clientUserMessageID:
                         state.entry.id.uuidString,
                     onThreadStarted: {
@@ -182,11 +187,14 @@ extension ControlPlaneService {
                 packID: state.contextPack.id,
                 status: .prepared
             )
-            let prompt =
-                state.contextPack.renderedMarkdown
-                + "\n\n# Current Project message\n\n"
-                + (state.entry.routedText
-                    ?? state.entry.text)
+            let promptPreferences = runtimePromptPreferences
+            let prompt = RuntimePromptPreferences.taskPrompt(
+                contextPack: state.contextPack.renderedMarkdown,
+                projectMessage: state.entry.routedText
+                    ?? state.entry.text,
+                additionalInstructions:
+                    promptPreferences.claudeCodeAdditionalInstructions
+            )
             let result = try client.runReadOnlyTask(
                 task: state.task,
                 contextPack: state.contextPack,
@@ -195,6 +203,8 @@ extension ControlPlaneService {
                 resumeSessionID:
                     state.binding.nativeSessionID,
                 promptOverride: prompt,
+                additionalSystemPrompt:
+                    promptPreferences.claudeCodeAdditionalInstructions,
                 onSessionStarted: {
                     [weak self] nativeSessionID in
                     try self?.markManagedContinuationStarted(
@@ -289,6 +299,102 @@ extension ControlPlaneService {
                 ]
             )
         )
+    }
+
+    /// Converts a first-message entry that waited while an initial native Run
+    /// was already starting into the normal continuation shape. This keeps a
+    /// fast composer submit from losing the user's message to a race between
+    /// Project creation and native session binding.
+    @discardableResult
+    public func promoteWorkspaceMessageToManagedContinuation(
+        entryID: UUID
+    ) throws -> ChatEntry {
+        guard var entry = try store.fetchChatEntry(id: entryID),
+              entry.deliveryState == .awaitingSession,
+              let endpointID = entry.targetEndpointID,
+              let task = try store.fetchTask(id: entry.taskID),
+              let endpoint = try store.fetchRegisteredEndpoint(id: endpointID),
+              endpoint.runtimeTypeID == Self.codexRuntimeTypeID
+                || endpoint.runtimeTypeID == Self.claudeCodeRuntimeTypeID,
+              let binding = try currentRuntimeSessionBinding(
+                  taskID: task.id,
+                  endpointID: endpoint.id,
+                  agentIdentityID: entry.targetAgentIdentityID
+              ) else {
+            throw MuError.invalidTransition(
+                "The native Runtime session is not ready for this Workspace message."
+            )
+        }
+        guard binding.state != .detached,
+              binding.state != .failed,
+              binding.state != .disconnected else {
+            throw MuError.invalidTransition(
+                "The native Runtime session ended before this Workspace message could start."
+            )
+        }
+        guard binding.state != .connecting,
+              binding.state != .working,
+              binding.state != .awaitingApproval else {
+            throw MuError.invalidTransition(
+                "The native Runtime session is still working."
+            )
+        }
+        guard WorkspacePathIdentity.isExactMatch(
+            binding.workspacePath,
+            task.repositoryPath
+        ) else {
+            throw MuError.invalidTransition(
+                "The native Runtime session belongs to another Project workspace."
+            )
+        }
+        let kernel = try projectKernelContext(taskID: task.id)
+        let actorID = binding.actorID ?? kernel.actor?.id
+        guard let actorID else {
+            throw MuError.invalidTransition(
+                "The native Runtime has no authorized Project Actor."
+            )
+        }
+        let run = RunRecord(
+            taskID: task.id,
+            projectID: kernel.project.id,
+            workspaceID: kernel.workspace.id,
+            actorID: actorID,
+            principalID: binding.principalID ?? kernel.principal?.id,
+            endpointID: endpoint.id,
+            actorName: binding.nativeAgentName,
+            purpose: .delegation,
+            state: .starting,
+            nativeThreadID: binding.nativeSessionID,
+            agentIdentityID: entry.targetAgentIdentityID
+        )
+        entry.runID = run.id
+        entry.runtimeSessionBindingID = binding.id
+        entry.nativeMessageIndexLowerBound = binding.lastSyncedMessageCount
+        entry.deliveryState = .queued
+        entry.updatedAt = Date()
+        try store.withTransaction {
+            try store.upsertRun(run)
+            try store.upsertChatEntry(entry)
+            try store.appendEvent(
+                LedgerEvent(
+                    projectID: kernel.project.id,
+                    actorID: actorID,
+                    principalID: run.principalID,
+                    workspaceID: kernel.workspace.id,
+                    taskID: task.id,
+                    runID: run.id,
+                    type: "runtime.message.queued",
+                    summary:
+                        "Queued the first Workspace message after the native session became resumable.",
+                    payload: [
+                        "chat_entry_id": entry.id.uuidString,
+                        "binding_id": binding.id.uuidString,
+                        "native_session_id": binding.nativeSessionID
+                    ]
+                )
+            )
+        }
+        return entry
     }
 
     private func beginManagedContinuation(

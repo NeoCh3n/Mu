@@ -209,6 +209,73 @@ struct ClaudeCodeAdapterTests {
         )
     }
 
+    @Test
+    func firstWorkspaceMessageStartsClaudeSessionInsteadOfRequiringResume()
+        throws
+    {
+        let fixture = try ClaudeCodeExecutableFixture()
+        defer { fixture.remove() }
+        let service = try ControlPlaneService(
+            dataDirectory: fixture.root.appending(
+                path: "mu-data",
+                directoryHint: .isDirectory
+            )
+        )
+        let endpoint = RuntimeEndpoint(
+            id: ControlPlaneService.claudeCodeEndpointID,
+            runtimeTypeID: ControlPlaneService.claudeCodeRuntimeTypeID,
+            displayName: "Claude Code Fixture",
+            adapterVersion: "test",
+            runtimeVersion: "fixture",
+            location: .local,
+            provenance: .vendorCLI,
+            permissionModel: .promptGate,
+            capabilities: ControlPlaneService.claudeCodeImplementedCapabilities,
+            status: .active,
+            guaranteeNote: "Test fixture only.",
+            nativeConfiguration: ["executable": fixture.executableURL.path]
+        )
+        try service.store.upsertEndpoint(endpoint)
+        let task = try service.createTask(
+            title: "First Claude workspace message",
+            objective: "Start Claude from the workspace composer.",
+            successCriteria: ["The first message is part of the native turn."],
+            constraints: ["Read only"],
+            pendingSteps: [],
+            repositoryPath: fixture.root.path,
+            sourceEndpointID: endpoint.id
+        )
+
+        let prepared = try service.prepareWorkspaceMessage(
+            taskID: task.id,
+            text: "Inspect the project and summarize the entry point.",
+            selectedEndpointID: endpoint.id
+        )
+        let route = try #require(prepared.route)
+        let runID = try #require(prepared.entry.runID)
+        #expect(prepared.entry.runtimeSessionBindingID == nil)
+        #expect(prepared.entry.deliveryState == .awaitingSession)
+
+        let result = try service.dispatchClaudeCodeTask(
+            runID: runID,
+            workspaceEntryID: prepared.entry.id
+        )
+        #expect(result.status == "success")
+        #expect(route.prompt.contains("Inspect the project"))
+
+        let deliveredEntry = try #require(
+            try service.store.fetchChatEntry(id: prepared.entry.id)
+        )
+        #expect(deliveredEntry.deliveryState == .delivered)
+        #expect(deliveredEntry.runtimeSessionBindingID != nil)
+        #expect(
+            try fixture.arguments().joined(separator: "\n")
+                .contains(
+                    "# Current Project message\n\nInspect the project and summarize the entry point."
+                )
+        )
+    }
+
     private func argumentValue(
         _ flag: String,
         in arguments: [String]

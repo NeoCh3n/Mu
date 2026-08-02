@@ -137,6 +137,67 @@ struct ControlPlaneSettingsView: View {
                     }
                 }
 
+                Panel(
+                    title: muText(store.interfaceLanguage, "Runtime instructions", "运行时指令"),
+                    subtitle: muText(
+                        store.interfaceLanguage,
+                        "Add guidance for Codex or Claude Code. Mu appends it to the governed Context Pack for each task.",
+                        "为 Codex 或 Claude Code 添加指导。Mu 会在每个任务中把它附加到受治理的 Context Pack。"
+                    )
+                ) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        runtimePromptEditor(
+                            title: muText(store.interfaceLanguage, "Codex additional instructions", "Codex 附加指令"),
+                            placeholder: muText(
+                                store.interfaceLanguage,
+                                "Example: Prefer a short evidence-first summary and call out uncertainty.",
+                                "例如：优先给出简短的证据摘要，并明确说明不确定性。"
+                            ),
+                            text: Binding(
+                                get: { store.codexPromptInstructions },
+                                set: { store.codexPromptInstructions = $0 }
+                            )
+                        )
+
+                        Divider()
+
+                        runtimePromptEditor(
+                            title: muText(store.interfaceLanguage, "Claude Code additional instructions", "Claude Code 附加指令"),
+                            placeholder: muText(
+                                store.interfaceLanguage,
+                                "Example: Explain the files you inspect before giving the final receipt.",
+                                "例如：在最终回执前，说明你检查过哪些文件。"
+                            ),
+                            text: Binding(
+                                get: { store.claudeCodePromptInstructions },
+                                set: { store.claudeCodePromptInstructions = $0 }
+                            )
+                        )
+
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "lock.shield")
+                                .foregroundStyle(MuPalette.mint)
+                            Text(muText(
+                                store.interfaceLanguage,
+                                "Mu's required safety rules remain fixed: read-only mode, exact workspace scope, no external network, no elevated permissions, and no private chain-of-thought output.",
+                                "Mu 的安全规则保持固定：只读模式、精确工作区范围、禁止外部网络、禁止提权，以及不输出私有思维链。"
+                            ))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        HStack {
+                            Spacer()
+                            Button(muText(store.interfaceLanguage, "Reset instructions", "恢复默认指令")) {
+                                store.codexPromptInstructions = ""
+                                store.claudeCodePromptInstructions = ""
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                }
+
                 RuntimeProviderSetupView()
 
                 Text(muText(store.interfaceLanguage, "Mu saves these preferences locally on this Mac. Runtime records and Project state continue to save automatically.", "Mu 会将这些偏好保存在本机。运行时记录和 Project 状态会继续自动保存。"))
@@ -179,5 +240,43 @@ struct ControlPlaneSettingsView: View {
             Spacer()
         }
         .padding(.vertical, 10)
+    }
+
+    private func runtimePromptEditor(
+        title: String,
+        placeholder: String,
+        text: Binding<String>
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title)
+                .font(.subheadline.weight(.medium))
+            ZStack(alignment: .topLeading) {
+                if text.wrappedValue.isEmpty {
+                    Text(placeholder)
+                        .font(.callout)
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 8)
+                        .allowsHitTesting(false)
+                }
+                TextEditor(text: text)
+                    .font(.callout)
+                    .frame(minHeight: 88, maxHeight: 140)
+                    .scrollContentBackground(.hidden)
+                    .padding(2)
+            }
+            .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(Color.primary.opacity(0.1))
+            }
+            Text(muText(
+                store.interfaceLanguage,
+                "Up to 8,000 characters. This is additional guidance, not a replacement for the task or safety contract.",
+                "最多 8,000 个字符。这是附加指导，不能替换任务内容或安全契约。"
+            ))
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+        }
     }
 }

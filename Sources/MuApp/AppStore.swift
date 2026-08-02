@@ -198,6 +198,26 @@ final class AppStore: ObservableObject {
         }
     }
 
+    @Published var codexPromptInstructions: String =
+        RuntimePromptPreferences.load().codexAdditionalInstructions {
+        didSet {
+            codexPromptInstructions = normalizedPromptInstructions(
+                codexPromptInstructions
+            )
+            persistRuntimePromptPreferences()
+        }
+    }
+
+    @Published var claudeCodePromptInstructions: String =
+        RuntimePromptPreferences.load().claudeCodeAdditionalInstructions {
+        didSet {
+            claudeCodePromptInstructions = normalizedPromptInstructions(
+                claudeCodePromptInstructions
+            )
+            persistRuntimePromptPreferences()
+        }
+    }
+
     @Published var section: AppSection = .overview
     @Published var tasks: [TaskRecord] = []
     @Published var projectPreferences: [ProjectPreference] = []
@@ -318,6 +338,10 @@ final class AppStore: ObservableObject {
     init(service: ControlPlaneService? = nil) {
         do {
             self.service = try service ?? ControlPlaneService()
+            self.service?.runtimePromptPreferences = RuntimePromptPreferences(
+                codexAdditionalInstructions: codexPromptInstructions,
+                claudeCodeAdditionalInstructions: claudeCodePromptInstructions
+            )
             reload()
             if let service = self.service {
                 // Keep Codex app-server startup off the UI thread and out of
@@ -332,6 +356,22 @@ final class AppStore: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func persistRuntimePromptPreferences() {
+        let preferences = RuntimePromptPreferences(
+            codexAdditionalInstructions: codexPromptInstructions,
+            claudeCodeAdditionalInstructions: claudeCodePromptInstructions
+        )
+        preferences.save()
+        service?.runtimePromptPreferences = preferences
+    }
+
+    private func normalizedPromptInstructions(_ value: String) -> String {
+        String(
+            value.trimmingCharacters(in: .whitespacesAndNewlines)
+                .prefix(RuntimePromptPreferences.maxAdditionalInstructionCharacters)
+        )
     }
 
     func showCompletionToast(_ message: String, taskID: UUID) {
@@ -963,6 +1003,66 @@ final class AppStore: ObservableObject {
         runs.filter { $0.taskID == taskID }.sorted { $0.createdAt > $1.createdAt }
     }
 
+    /// Returns the current native execution when Mu can send a real interrupt
+    /// to its Runtime. Codex needs both native identifiers; Claude Code can be
+    /// interrupted as soon as its Mu-launched process is registered.
+    func interruptibleRun(for taskID: UUID) -> RunRecord? {
+        guard let task = task(id: taskID),
+              let runID = task.currentRunID,
+              let run = runs.first(where: { $0.id == runID }),
+              run.purpose == .execution,
+              run.state == .starting || run.state == .active,
+              let endpoint = endpoint(id: run.endpointID) else {
+            return nil
+        }
+        switch endpoint.runtimeTypeID {
+        case ControlPlaneService.codexRuntimeTypeID:
+            guard run.nativeThreadID != nil,
+                  run.nativeTurnID != nil else {
+                return nil
+            }
+        case ControlPlaneService.claudeCodeRuntimeTypeID:
+            guard dispatchingRunIDs.contains(run.id) else { return nil }
+        case ControlPlaneService.openWorkerRuntimeTypeID:
+            guard runtimeSessionBindings.contains(where: {
+                $0.taskID == taskID
+                    && $0.runID == run.id
+                    && ($0.state == .working || $0.state == .awaitingApproval)
+            }) else {
+                return nil
+            }
+        default:
+            return nil
+        }
+        return run
+    }
+
+    func interruptCurrentRun(taskID: UUID) {
+        guard let run = interruptibleRun(for: taskID),
+              let endpoint = endpoint(id: run.endpointID) else {
+            errorMessage = "No interruptible Runtime turn is currently active."
+            return
+        }
+        switch endpoint.runtimeTypeID {
+        case ControlPlaneService.codexRuntimeTypeID:
+            interruptCodex(run)
+        case ControlPlaneService.claudeCodeRuntimeTypeID:
+            interruptClaudeCode(run)
+        case ControlPlaneService.openWorkerRuntimeTypeID:
+            guard let binding = runtimeSessionBindings.first(where: {
+                $0.taskID == taskID
+                    && $0.runID == run.id
+                    && ($0.state == .working || $0.state == .awaitingApproval)
+            }) else {
+                errorMessage = "The active OpenWorker session could not be found."
+                return
+            }
+            interruptOpenWorker(binding)
+        default:
+            errorMessage = "This Runtime does not support interruption."
+        }
+    }
+
     func checkpoints(for taskID: UUID) -> [CheckpointRecord] {
         checkpoints.filter { $0.taskID == taskID }.sorted { $0.createdAt > $1.createdAt }
     }
@@ -1464,13 +1564,13 @@ final class AppStore: ObservableObject {
                 .runtimeTypeID
             if runtimeTypeID
                 == ControlPlaneService.codexRuntimeTypeID {
-                dispatchManagedWorkspaceMessage(
+                dispatchWorkspaceMessage(
                     entryID: prepared.entry.id,
                     provider: .codex
                 )
             } else if runtimeTypeID
                 == ControlPlaneService.claudeCodeRuntimeTypeID {
-                dispatchManagedWorkspaceMessage(
+                dispatchWorkspaceMessage(
                     entryID: prepared.entry.id,
                     provider: .claudeCode
                 )
@@ -1613,7 +1713,7 @@ final class AppStore: ObservableObject {
                 reload()
                 switch result {
                 case .success(let status):
-                    if status == "completed" {
+                    if status == "completed" || status == "success" {
                         transientMessage = nil
                         if let runID,
                            let taskID = runs.first(where: { $0.id == runID })?.taskID {
@@ -1631,6 +1731,220 @@ final class AppStore: ObservableObject {
                     errorMessage = error.localizedDescription
                 }
             }
+        }
+    }
+
+    private func dispatchWorkspaceMessage(
+        entryID: UUID,
+        provider: ConversationProvider
+    ) {
+        guard let entry = chatEntries.first(where: { $0.id == entryID }) else {
+            errorMessage = "The Workspace message could not be found."
+            return
+        }
+        if entry.runtimeSessionBindingID == nil {
+            dispatchInitialManagedWorkspaceMessage(
+                entryID: entryID,
+                provider: provider
+            )
+            return
+        }
+        guard let bindingID = entry.runtimeSessionBindingID,
+              let binding = runtimeSessionBindings.first(where: {
+                  $0.id == bindingID
+              }) else {
+            errorMessage = "The Runtime session binding could not be found."
+            return
+        }
+        if binding.state == .connecting || binding.state == .working {
+            waitForManagedWorkspaceMessage(
+                entryID: entryID,
+                provider: provider,
+                bindingID: bindingID
+            )
+            return
+        }
+        dispatchManagedWorkspaceMessage(
+            entryID: entryID,
+            provider: provider
+        )
+    }
+
+    private func waitForManagedWorkspaceMessage(
+        entryID: UUID,
+        provider: ConversationProvider,
+        bindingID: UUID
+    ) {
+        transientMessage =
+            "\(provider.displayName) is finishing its current turn; your message is queued."
+        Task { @MainActor [weak self] in
+            for _ in 0..<240 {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard let self else { return }
+                reload()
+                guard let entry = chatEntries.first(where: { $0.id == entryID }) else {
+                    return
+                }
+                if let currentBinding = runtimeSessionBindings.first(where: {
+                    $0.id == bindingID
+                }), currentBinding.state == .connecting || currentBinding.state == .working {
+                    continue
+                }
+                if entry.runtimeSessionBindingID == nil {
+                    do {
+                        _ = try service?.promoteWorkspaceMessageToManagedContinuation(
+                            entryID: entryID
+                        )
+                        reload()
+                    } catch {
+                        // A failed initial Run updates the entry to failed;
+                        // surface that state instead of retrying forever.
+                        if entry.deliveryState != .awaitingSession {
+                            errorMessage = error.localizedDescription
+                            return
+                        }
+                        continue
+                    }
+                }
+                dispatchManagedWorkspaceMessage(
+                    entryID: entryID,
+                    provider: provider
+                )
+                return
+            }
+            self?.errorMessage =
+                "\(provider.displayName) did not become ready for the queued message."
+        }
+    }
+
+    /// Starts a native session for the first message on a Runtime that has
+    /// not yet been bound to this Task. The initial prompt includes the
+    /// user's message, so the first Workspace message is a real turn rather
+    /// than an artificial empty warm-up followed by a second turn.
+    private func dispatchInitialManagedWorkspaceMessage(
+        entryID: UUID,
+        provider: ConversationProvider
+    ) {
+        guard let service,
+              let entry = chatEntries.first(where: { $0.id == entryID }),
+              let runID = entry.runID else {
+            errorMessage = "The initial Runtime Run could not be prepared."
+            return
+        }
+        guard !dispatchingRunIDs.contains(runID) else {
+            // A Project created moments ago may already be dispatching its
+            // initial Run. Keep the entry and attach it as soon as that Run
+            // has established a resumable native session.
+            transientMessage =
+                "\(provider.displayName) is still starting its native session."
+            waitForInitialManagedWorkspaceMessage(
+                entryID: entryID,
+                provider: provider,
+                runID: runID
+            )
+            return
+        }
+        dispatchingRunIDs.insert(runID)
+        Task { [weak self] in
+            while self?.dispatchingRunIDs.contains(runID) == true {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard let self,
+                      dispatchingRunIDs.contains(runID) else {
+                    break
+                }
+                reload()
+            }
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result: Result<String, Error>
+            switch provider {
+            case .codex:
+                result = Result {
+                    let receipt = try service.dispatchCodexTask(
+                        runID: runID,
+                        workspaceEntryID: entryID
+                    )
+                    return receipt.status
+                }
+            case .claudeCode:
+                result = Result {
+                    let receipt = try service.dispatchClaudeCodeTask(
+                        runID: runID,
+                        workspaceEntryID: entryID
+                    )
+                    return receipt.status
+                }
+            default:
+                result = .failure(
+                    MuError.capabilityMissing(
+                        "This Runtime has no managed initial Workspace adapter."
+                    )
+                )
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                dispatchingRunIDs.remove(runID)
+                reload()
+                switch result {
+                case .success(let status):
+                    if status == "completed" || status == "success" {
+                        transientMessage = nil
+                        announceTaskCompletion(
+                            taskID: entry.taskID,
+                            agentName: provider.displayName
+                        )
+                    } else {
+                        transientMessage =
+                            "\(provider.displayName) finished with status \(status); "
+                            + "the result is available for Project review."
+                    }
+                case .failure(let error):
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func waitForInitialManagedWorkspaceMessage(
+        entryID: UUID,
+        provider: ConversationProvider,
+        runID: UUID
+    ) {
+        Task { @MainActor [weak self] in
+            for _ in 0..<240 {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard let self else { return }
+                reload()
+                guard let entry = chatEntries.first(where: { $0.id == entryID }) else {
+                    return
+                }
+                guard entry.deliveryState == .awaitingSession else {
+                    if entry.deliveryState == .failed || entry.deliveryState == .ambiguous {
+                        errorMessage = "\(provider.displayName) could not start this message."
+                    }
+                    return
+                }
+                if dispatchingRunIDs.contains(runID) {
+                    continue
+                }
+                do {
+                    _ = try service?.promoteWorkspaceMessageToManagedContinuation(
+                        entryID: entryID
+                    )
+                    reload()
+                    dispatchWorkspaceMessage(
+                        entryID: entryID,
+                        provider: provider
+                    )
+                    return
+                } catch {
+                    // The native binding can be persisted a few milliseconds
+                    // after the dispatcher releases its Run lease.
+                    continue
+                }
+            }
+            self?.errorMessage =
+                "\(provider.displayName) did not create a native session for the queued message."
         }
     }
 
@@ -1936,7 +2250,7 @@ final class AppStore: ObservableObject {
                 self.reload()
                 switch result {
                 case .success(let receipt):
-                    if receipt.status == "completed" {
+                    if receipt.status == "completed" || receipt.status == "success" {
                         self.transientMessage = nil
                         announceTaskCompletion(
                             taskID: run.taskID,
@@ -2000,7 +2314,7 @@ final class AppStore: ObservableObject {
                 reload()
                 switch result {
                 case .success(let receipt):
-                    if receipt.status == "completed" {
+                    if receipt.status == "completed" || receipt.status == "success" {
                         transientMessage = nil
                         announceTaskCompletion(
                             taskID: run.taskID,

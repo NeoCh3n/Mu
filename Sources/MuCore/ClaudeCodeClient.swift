@@ -502,6 +502,7 @@ public final class ClaudeCodeClient:
         sessionID: String = UUID().uuidString.lowercased(),
         resumeSessionID: String? = nil,
         promptOverride: String? = nil,
+        additionalSystemPrompt: String = "",
         onSessionStarted:
             @escaping @Sendable (String) throws -> Void = { _ in },
         onVisibleText:
@@ -537,7 +538,8 @@ public final class ClaudeCodeClient:
             contextPack: contextPack,
             sessionID: sessionID,
             resumeSessionID: resumeSessionID,
-            promptOverride: promptOverride
+            promptOverride: promptOverride,
+            additionalSystemPrompt: additionalSystemPrompt
         )
         let outputPipe = Pipe()
         let errorPipe = Pipe()
@@ -653,8 +655,15 @@ public final class ClaudeCodeClient:
         contextPack: ProjectContextPackRecord,
         sessionID: String,
         resumeSessionID: String?,
-        promptOverride: String?
+        promptOverride: String?,
+        additionalSystemPrompt: String = ""
     ) -> [String] {
+        let baseSystemPrompt =
+            "You are an Agent Actor working through Mu. "
+                + "Treat the supplied Context Pack as the bounded Project "
+                + "contract. Stay read-only, do not use external network, "
+                + "do not expose private thinking, and return a reviewable "
+                + "result with evidence."
         var values = [
             "--print",
             "--output-format", "stream-json",
@@ -665,11 +674,10 @@ public final class ClaudeCodeClient:
             "--disallowedTools",
             "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch",
             "--append-system-prompt",
-            "You are an Agent Actor working through Mu. "
-                + "Treat the supplied Context Pack as the bounded Project "
-                + "contract. Stay read-only, do not use external network, "
-                + "do not expose private thinking, and return a reviewable "
-                + "result with evidence.",
+            RuntimePromptPreferences.systemPrompt(
+                base: baseSystemPrompt,
+                additionalInstructions: additionalSystemPrompt
+            ),
             "--name", "Mu · \(task.title)"
         ]
         if let resumeSessionID {

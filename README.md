@@ -1,26 +1,172 @@
 # Mu
 
-### A local-first control plane for real agent work
+**Language / 语言： [中文](#中文) · [English](#english)**
 
-Mu gives developers one durable Project workspace for work that may move between
-Codex, Claude Code, OpenWorker, and future Agent hosts. It keeps the Project's
-truth, permissions, Context Packs, evidence, and history under Mu's control
-while each vendor Runtime keeps its own native state.
+## 中文
 
-Mu is built for the moment when a task outgrows one chat window:
+**面向人类与 AI Agent 的项目协作操作系统。**
 
-- **Route work explicitly.** Mention **@Codex**, **@Claude**, **@OpenWorker**, or a
-  named Agent and Mu sends one bounded Project message to the verified endpoint.
-- **Keep context portable.** Import local history as reviewable Raw Sources,
-  select what becomes accepted Context, and deliver a fresh, bounded Context
-  Pack to the next Runtime.
-- **Make identity visible.** Codex Desktop, Codex CLI, Claude Code terminals,
-  and other endpoints remain distinct through persisted instance identity.
-- **Keep humans in control.** Local state is durable and auditable; read-only
-  defaults, exact-workspace checks, leases, approvals, and evidence receipts
-  make the integration boundary explicit.
+Mu 是一套开放架构，用于让人类、编程 Agent、研究 Agent 以及用户自带的 Agent 在同一个项目中协作。
 
-## Current verified scope
+Mu 不把 Agent 当作彼此隔离的聊天会话，而是为每个参与者提供明确的身份、任务范围、权限边界、独立工作区和审计记录。项目知识不依赖任何单一模型或 Runtime，使不同 Agent 能够在不共享私有记忆、不互相覆盖上下文的情况下协同工作。
+
+Mu 计划通过统一的 Runtime Adapter 接入 Codex、Claude Code、CodeBuddy、OpenWorker 及外部托管 Agent，同时通过 MCP 为不同 Runtime 提供共享的工具、文件、代码仓库和外部系统访问能力。
+
+### Mu 正在构建什么
+
+- 以 Project 为中心的人类与 Agent 协作
+- 支持用户自带 Agent，包括外部托管 Agent
+- 面向不同 Agent Runtime 的统一适配层
+- 可追溯、可版本化的任务级 Context Pack
+- 支持多个 Agent 并行执行的隔离工作区
+- 明确的权限、委派、审查与审批机制
+- 能识别冲突的项目记忆，而不是一个共享 Prompt
+- 可重建的执行记录，能够确认 Agent 当时获得了哪些上下文
+- 供不同 Runtime 共用的 MCP 工具与集成层
+
+### 核心原则
+
+```text
+Project State 由 Mu 管理。
+Runtime State 由各 Agent Runtime 管理。
+工具与外部系统通过 MCP 接入。
+```
+
+Mu 不是另一个 Agent Wrapper，也不是多模型聊天界面。
+
+它面向以下协作场景：
+
+- 一个人同时使用多个 Agent
+- 多个人分别带自己的 Agent 加入项目
+- 有人加入项目，但不带 Agent
+- 某个组织只派 Agent 加入，人不直接参与
+- Agent 通过任务和 Artifact 进行工作交接
+- 项目决策可以跨模型、跨 Runtime 完整追溯
+
+### 架构
+
+```mermaid
+flowchart TB
+    participants["人类与 Agent 参与者"]
+    control["Mu Project Control Plane"]
+    state["任务 · 上下文 · 权限<br/>产物 · 审查 · 事件"]
+    adapters["Runtime Adapters"]
+    runtimes["Codex · Claude Code · CodeBuddy<br/>OpenWorker · External Agents"]
+    tools["MCP Tools"]
+
+    participants --> control
+    control --> state
+    state --> adapters
+    adapters --> runtimes
+    runtimes --> tools
+    tools --> control
+```
+
+Mu 希望让人类与 Agent 的协作，像现代软件开发一样结构化、可检查、可追溯、可迁移。
+
+### 协作流程
+
+```mermaid
+flowchart LR
+    project["创建或进入 Project"]
+    identity["确认参与者身份<br/>人类 / Agent / 外部组织"]
+    scope["定义任务范围<br/>权限边界 · 工作区 · 成功条件"]
+    context["生成任务级 Context Pack<br/>版本化 · 可审查 · 可重建"]
+    route["通过 Runtime Adapter 路由"]
+    runtime["Agent Runtime 执行<br/>Codex / Claude Code / CodeBuddy / OpenWorker"]
+    mcp["通过 MCP 调用共享工具<br/>文件 · 仓库 · 外部系统"]
+    artifact["产出 Artifact 与执行记录"]
+    review["人类或 Agent 审查<br/>审批 · 冲突识别 · 委派"]
+    memory["更新 Mu Project State<br/>项目记忆 · 事件 · 审计记录"]
+
+    project --> identity --> scope --> context --> route --> runtime
+    runtime --> mcp --> artifact --> review --> memory
+    memory --> context
+```
+
+## English
+
+**A project collaboration operating system for humans and AI agents.**
+
+Mu is an open architecture for helping humans, coding agents, research agents, and user-owned agents collaborate inside the same project.
+
+Mu does not treat agents as isolated chat sessions. It gives every participant a clear identity, task scope, permission boundary, independent workspace, and audit trail. Project knowledge does not depend on any single model or runtime, so different agents can work together without sharing private memory or overwriting each other's context.
+
+Mu plans to connect Codex, Claude Code, CodeBuddy, OpenWorker, and externally hosted agents through a unified Runtime Adapter layer, while MCP gives those runtimes shared access to tools, files, code repositories, and external systems.
+
+### What Mu Is Building
+
+- Project-centered collaboration between humans and agents
+- Support for user-owned agents, including externally hosted agents
+- A unified adapter layer for different agent runtimes
+- Traceable, versioned task-level Context Packs
+- Isolated workspaces for multiple agents running in parallel
+- Explicit permissions, delegation, review, and approval
+- Conflict-aware project memory instead of one shared prompt
+- Reconstructable execution records that show what context an agent received
+- Shared MCP tools and integrations across runtimes
+
+### Core Principles
+
+```text
+Project State is managed by Mu.
+Runtime State is managed by each Agent Runtime.
+Tools and external systems connect through MCP.
+```
+
+Mu is not another agent wrapper or multi-model chat interface.
+
+It is built for collaboration patterns where:
+
+- One person uses multiple agents at the same time
+- Multiple people each bring their own agents into a project
+- Someone joins a project without bringing an agent
+- An organization contributes only agents, without direct human participation
+- Agents hand off work through tasks and artifacts
+- Project decisions remain traceable across models and runtimes
+
+### Architecture
+
+```mermaid
+flowchart TB
+    participants["Human and Agent Participants"]
+    control["Mu Project Control Plane"]
+    state["Tasks · Context · Permissions<br/>Artifacts · Review · Events"]
+    adapters["Runtime Adapters"]
+    runtimes["Codex · Claude Code · CodeBuddy<br/>OpenWorker · External Agents"]
+    tools["MCP Tools"]
+
+    participants --> control
+    control --> state
+    state --> adapters
+    adapters --> runtimes
+    runtimes --> tools
+    tools --> control
+```
+
+Mu aims to make collaboration between humans and agents as structured, inspectable, traceable, and portable as modern software development.
+
+### Collaboration Flow
+
+```mermaid
+flowchart LR
+    project["Create or enter a Project"]
+    identity["Confirm participant identity<br/>Human / Agent / External organization"]
+    scope["Define task scope<br/>Permissions · Workspace · Success criteria"]
+    context["Generate task-level Context Pack<br/>Versioned · Reviewable · Reconstructable"]
+    route["Route through Runtime Adapter"]
+    runtime["Agent Runtime executes<br/>Codex / Claude Code / CodeBuddy / OpenWorker"]
+    mcp["Call shared tools through MCP<br/>Files · Repositories · External systems"]
+    artifact["Produce artifacts and execution records"]
+    review["Human or agent review<br/>Approval · Conflict detection · Delegation"]
+    memory["Update Mu Project State<br/>Project memory · Events · Audit log"]
+
+    project --> identity --> scope --> context --> route --> runtime
+    runtime --> mcp --> artifact --> review --> memory
+    memory --> context
+```
+
+### Current verified scope
 
 | Area | What is implemented and verified |
 | --- | --- |
@@ -38,7 +184,7 @@ acceptance. Pi is a future adapter candidate, not a live Runtime in this
 release. Mu does not claim vendor workspace writes or Runtime approval
 interception where the adapter has not proved those capabilities.
 
-## Why Mu
+### Why Mu
 
 Mu is not a chat wrapper that merges several vendor transcripts into one
 unbounded prompt. It is a control plane that lets a Project survive a Runtime
@@ -131,7 +277,7 @@ content-addressed evidence store and append-only ledger. Exact-workspace read-on
 continuations and interruption use the same native thread. Mu does not claim Codex
 workspace writes or Runtime approval interception.
 
-## TypeScript rewrite (mu-ts)
+### TypeScript rewrite (mu-ts)
 
 A TypeScript implementation of the Mu control plane lives in [`mu-ts/`](mu-ts/)
 (pnpm monorepo), schema-compatible with the Swift SQLite store. All eight
@@ -176,12 +322,12 @@ The server doubles as the app: after `pnpm --filter @mu/ui build`, opening
 Run `pnpm --filter @mu/ui dev` instead for live UI development (Vite proxies
 to the server on port 4000).
 
-## Requirements
+### Requirements
 
 - macOS 14 or newer
 - Xcode 16 or newer (Xcode 26.6 is the verified build toolchain)
 
-## Build the macOS app
+### Build the macOS app
 
 ```sh
 ./scripts/build-macos.sh
@@ -196,7 +342,7 @@ build/Mu.app
 Open `Package.swift` in Xcode for development, or run the `MuApp` Swift Package
 scheme.
 
-## Test
+### Test
 
 ```sh
 ./scripts/test.sh
@@ -214,7 +360,7 @@ idempotent import, same-text/different-ordinal preservation, deterministic Unico
 Context bounds, target-aware one-time delivery, injected unknown-provider history
 import, and history survival after Runtime removal.
 
-## Current integration boundary
+### Current integration boundary
 
 Mu ships two offline synthetic endpoints so the control-plane workflow remains
 testable without vendor accounts. The manual artifact bridge captures Git evidence
