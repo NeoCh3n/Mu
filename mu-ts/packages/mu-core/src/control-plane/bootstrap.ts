@@ -23,7 +23,7 @@ export interface BootstrappedControlPlane {
   readonly service: ControlPlaneService
   readonly store: SQLiteStore
   readonly harness: Harness
-  /** IDs of the seeded default agents. */
+  /** IDs of optional identities created by an embedding, if any. */
   readonly agentIDs: Record<string, string>
   /** IDs of the endpoints created from discovered executables. */
   readonly endpointIDs: Record<string, string>
@@ -31,8 +31,9 @@ export interface BootstrappedControlPlane {
 
 /**
  * Assembles a local-mode deployment: SQLite store, a local harness built
- * from discovered executables (or injected paths), default agents, and
- * registered endpoints. Mirrors the Swift bootstrap.
+ * from discovered executables (or injected paths) and registered endpoints.
+ * Agent identities are deliberately not seeded: a Task can run directly
+ * through a local Runtime and acquire a reusable identity later.
  */
 export function bootstrapLocalControlPlane(
   options: BootstrapLocalControlPlaneOptions,
@@ -59,32 +60,6 @@ export function bootstrapLocalControlPlane(
   const service = createControlPlaneService({ store, harness, now })
 
   const principalID = options.principalID ?? 'local-user'
-
-  // Default agents, mirroring the Swift seed.
-  const orchestrator = service.createAgent({
-    displayName: 'Orchestrator',
-    shortName: 'orchestrator',
-    role: 'orchestrator',
-    summary: 'Plans and routes tasks across agents.',
-  })
-  const builder = service.createAgent({
-    displayName: 'Builder',
-    shortName: 'builder',
-    role: 'builder',
-    summary: 'Implements task work in the workspace.',
-  })
-  const researcher = service.createAgent({
-    displayName: 'Researcher',
-    shortName: 'researcher',
-    role: 'researcher',
-    summary: 'Discovers and verifies context facts.',
-  })
-  const reviewer = service.createAgent({
-    displayName: 'Reviewer',
-    shortName: 'reviewer',
-    role: 'reviewer',
-    summary: 'Reviews work and approves changes.',
-  })
 
   // Endpoints from discovered executables, each carrying its real instance
   // identity (executable path, surface kind, stable key) so the UI can show
@@ -140,12 +115,7 @@ export function bootstrapLocalControlPlane(
     service,
     store,
     harness,
-    agentIDs: {
-      orchestrator: orchestrator.id,
-      builder: builder.id,
-      researcher: researcher.id,
-      reviewer: reviewer.id,
-    },
+    agentIDs: {},
     endpointIDs,
   }
 }

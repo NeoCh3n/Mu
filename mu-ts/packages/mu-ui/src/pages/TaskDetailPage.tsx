@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useParams } from 'react-router'
-import { api, type ContextRecord, type Endpoint, type ExternalConversationCandidate, type RunRecord } from '../api.ts'
-import { useQuery, useSSE } from '../hooks.ts'
+import { api, type ContextRecord, type Endpoint, type ExternalConversationCandidate, type LedgerEvent, type RunRecord } from '../api.ts'
+import { useMuUISettings, useQuery, useSSE } from '../hooks.ts'
+import { statusText, text } from '../i18n.ts'
 import { ErrorBanner } from './ProjectsPage.tsx'
 
 const EFFORTS = [
@@ -22,10 +23,13 @@ const SURFACES = [
 /** Workspace for one task: chat + live stream + endpoint/context inspector. */
 export function TaskDetailPage() {
   const { id = '' } = useParams()
+  const { settings } = useMuUISettings()
+  const t = (english: string, simplifiedChinese: string) => text(settings.language, english, simplifiedChinese)
   const { data: task, error } = useQuery(() => api.fetchTask(id), [id])
   const { data: chat, reload: reloadChat } = useQuery(() => api.listChat(id), [id])
   const { data: runs, reload: reloadRuns } = useQuery(() => api.listRuns(id), [id])
   const { data: artifacts, reload: reloadArtifacts } = useQuery(() => api.listArtifacts(id), [id])
+  const { data: ledger, reload: reloadLedger } = useQuery(() => api.listLedger(id), [id])
   const { data: contexts, reload: reloadContexts } = useQuery(() => api.listContext(id), [id])
   const { data: endpointData } = useQuery(() => api.listEndpoints())
   const sse = useSSE(150)
@@ -39,32 +43,43 @@ export function TaskDetailPage() {
   const [effort, setEffort] = useState('auto')
   const [selectedContextIDs, setSelectedContextIDs] = useState<string[]>([])
   const [streamingText, setStreamingText] = useState('')
+  const [liveActivities, setLiveActivities] = useState<ActivityItem[]>([])
+  const [activityOpen, setActivityOpen] = useState(true)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [historyLoading, setHistoryLoading] = useState(false)
   const [historyError, setHistoryError] = useState<string | undefined>()
   const [history, setHistory] = useState<ExternalConversationCandidate[]>([])
   const [hydratingID, setHydratingID] = useState<string | undefined>()
   const chatEndRef = useRef<HTMLDivElement>(null)
+  const seenActivityIDs = useRef(new Set<string>())
 
   const endpoints = endpointData?.endpoints ?? []
   const currentTask = task?.task
   const running = runs?.runs.some((run) => ['starting', 'active'].includes(run.state)) === true
   const latestRun = runs?.runs[0]
-  const mentionedEndpoint = useMemo(() => resolveMentionEndpoint(input, endpoints), [input, endpoints])
-  const effectiveEndpointID = mentionedEndpoint?.id
-    ?? selectedEndpointID
-    ?? currentTask?.currentEndpointID
-    ?? endpoints.find((endpoint) => endpoint.status === 'active')?.id
-    ?? endpoints[0]?.id
-    ?? ''
+  const runnableEndpoints = useMemo(
+    () => endpoints.filter((endpoint) => endpoint.status === 'active'),
+    [endpoints],
+  )
+  const effectiveEndpointID = selectedEndpointID
+    || currentTask?.currentEndpointID
+    || endpoints.find((endpoint) => endpoint.status === 'active')?.id
+    || endpoints[0]?.id
+    || ''
   const effectiveEndpoint = endpoints.find((endpoint) => endpoint.id === effectiveEndpointID)
   const autoEffort = inferEffort(currentTask?.title ?? '', currentTask?.objective ?? '')
+  const activityItems = useMemo(
+    () => mergeActivityItems(ledger?.events ?? [], liveActivities),
+    [ledger?.events, liveActivities],
+  )
 
   useEffect(() => {
     const current = endpoints.find((endpoint) => endpoint.id === currentTask?.currentEndpointID)
-    const fallback = current ?? endpoints.find((endpoint) => endpoint.status === 'active') ?? endpoints[0]
-    if (selectedEndpointID === '' && fallback !== undefined) setSelectedEndpointID(fallback.id)
-  }, [currentTask?.currentEndpointID, endpoints, selectedEndpointID])
+    const fallback = current ?? runnableEndpoints[0] ?? endpoints[0]
+    if ((selectedEndpointID === '' || !endpoints.some((endpoint) => endpoint.id === selectedEndpointID)) && fallback !== undefined) {
+      setSelectedEndpointID(fallback.id)
+    }
+  }, [currentTask?.currentEndpointID, endpoints, runnableEndpoints, selectedEndpointID])
 
   useEffect(() => {
     if (contexts?.records === undefined) return
@@ -78,14 +93,15 @@ export function TaskDetailPage() {
       reloadChat()
       reloadRuns()
       reloadArtifacts()
+      reloadLedger()
     }, 900)
     return () => clearInterval(timer)
-  }, [running, reloadArtifacts, reloadChat, reloadRuns])
+  }, [running, reloadArtifacts, reloadChat, reloadLedger, reloadRuns])
 
   useEffect(() => {
     const latest = sse[sse.length - 1]
     if (latest === undefined) return
-    const payload = latest.data as { taskID?: string; event?: { kind?: string; text?: string } } | null
+    const payload = latest.data as { taskID?: string; event?: { kind?: string; text?: string; activity?: RuntimeActivityPayload } } | null
     if (payload?.taskID !== id) return
     if (latest.event === 'turn_event' && payload.event?.kind === 'visible_text' && payload.event.text !== undefined) {
       setStreamingText((current) => current + payload.event!.text)
@@ -96,8 +112,27 @@ export function TaskDetailPage() {
       reloadChat()
       reloadRuns()
       reloadArtifacts()
+      reloadLedger()
     }
-  }, [id, reloadArtifacts, reloadChat, reloadRuns, sse])
+  }, [id, reloadArtifacts, reloadChat, reloadLedger, reloadRuns, sse])
+
+  useEffect(() => {
+    for (const envelope of sse) {
+      if (envelope.event !== 'turn_event') continue
+      const payload = envelope.data as { taskID?: string; event?: { kind?: string; activity?: RuntimeActivityPayload } } | null
+      if (payload?.taskID !== id || payload.event?.kind !== 'activity' || payload.event.activity === undefined) continue
+      const activity = payload.event.activity
+      const activityID = `${activity.id ?? activity.phase}:${activity.status}:${activity.title}`
+      if (seenActivityIDs.current.has(activityID)) continue
+      seenActivityIDs.current.add(activityID)
+      setLiveActivities((current) => [...current, activityItemFromRuntime(activity, activityID)])
+    }
+  }, [id, sse])
+
+  useEffect(() => {
+    setLiveActivities([])
+    seenActivityIDs.current = new Set<string>()
+  }, [id])
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -200,24 +235,24 @@ export function TaskDetailPage() {
     <div className="mx-auto max-w-[1440px] p-4 md:p-6">
       <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="mb-1 text-xs uppercase tracking-[0.18em] text-zinc-600">Project workspace</div>
-          <h1 className="truncate text-2xl font-semibold tracking-tight text-zinc-100">{currentTask?.title ?? 'Task'}</h1>
+          <div className="mb-1 text-xs uppercase tracking-[0.18em] text-zinc-600">{t('Project workspace', 'Project 工作区')}</div>
+          <h1 className="truncate text-2xl font-semibold tracking-tight text-zinc-100">{currentTask?.title ?? t('Task', '任务')}</h1>
           <p className="mt-1 max-w-3xl text-sm leading-6 text-zinc-400">{currentTask?.objective}</p>
           <p className="mt-1 truncate font-mono text-xs text-zinc-600">{currentTask?.repositoryPath}</p>
         </div>
         <div className="flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/80 p-2">
           <span className={`h-2.5 w-2.5 rounded-full ${running ? 'animate-pulse bg-blue-400' : 'bg-zinc-600'}`} />
-          <span className="text-xs text-zinc-400">{running ? 'Working' : currentTask?.status ?? 'Loading'}</span>
+          <span className="text-xs text-zinc-400">{running ? t('Working', '工作中') : currentTask?.status === undefined ? t('Loading', '加载中') : statusText(settings.language, currentTask.status)}</span>
         </div>
       </div>
       {error !== undefined && <ErrorBanner message={error} />}
       {errorMessage !== undefined && <ErrorBanner message={errorMessage} />}
 
       <div className="relative mb-4 flex flex-wrap items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/70 p-1.5">
-        <button type="button" onClick={() => setSurface('chat')} className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${surface === 'chat' ? 'bg-violet-500/15 text-violet-200' : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200'}`}>Chat</button>
-        <button type="button" onClick={() => setToolsOpen((current) => !current)} className="rounded-lg px-3 py-1.5 text-xs font-semibold text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200">Tools ▾</button>
-        {toolsOpen && <div className="absolute left-1 top-11 z-20 w-44 rounded-xl border border-zinc-700 bg-zinc-900 p-1.5 shadow-2xl"><div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.15em] text-zinc-600">Workspace tools</div>{SURFACES.filter((item) => item.value !== 'chat').map((item) => <button key={item.value} type="button" onClick={() => { setSurface(item.value); setToolsOpen(false) }} className="block w-full rounded-lg px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800">{item.label}</button>)}<div className="my-1 border-t border-zinc-800" /><button type="button" onClick={() => { setEnvironmentOpen(true); setToolsOpen(false) }} className="block w-full rounded-lg px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800">Environment</button></div>}
-        <button type="button" onClick={() => setEnvironmentOpen((current) => !current)} className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${environmentOpen ? 'bg-violet-500/15 text-violet-200' : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200'}`}>{environmentOpen ? 'Hide Environment' : 'Environment'}</button>
+        <button type="button" onClick={() => setSurface('chat')} className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${surface === 'chat' ? 'bg-violet-500/15 text-violet-200' : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200'}`}>{t('Chat', '聊天')}</button>
+        <button type="button" onClick={() => setToolsOpen((current) => !current)} className="rounded-lg px-3 py-1.5 text-xs font-semibold text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200">{t('Tools', '工具')} ▾</button>
+        {toolsOpen && <div className="absolute left-1 top-11 z-20 w-44 rounded-xl border border-zinc-700 bg-zinc-900 p-1.5 shadow-2xl"><div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.15em] text-zinc-600">{t('Workspace tools', '工作区工具')}</div>{SURFACES.filter((item) => item.value !== 'chat').map((item) => <button key={item.value} type="button" onClick={() => { setSurface(item.value); setToolsOpen(false) }} className="block w-full rounded-lg px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800">{surfaceText(settings.language, item.value)}</button>)}<div className="my-1 border-t border-zinc-800" /><button type="button" onClick={() => { setEnvironmentOpen(true); setToolsOpen(false) }} className="block w-full rounded-lg px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800">{t('Environment', '环境')}</button></div>}
+        <button type="button" onClick={() => setEnvironmentOpen((current) => !current)} className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition ${environmentOpen ? 'bg-violet-500/15 text-violet-200' : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200'}`}>{environmentOpen ? t('Hide Environment', '隐藏环境') : t('Environment', '环境')}</button>
         <span className="ml-auto truncate px-2 font-mono text-[10px] text-zinc-600">{currentTask?.repositoryPath}</span>
       </div>
 
@@ -225,19 +260,16 @@ export function TaskDetailPage() {
         {surface === 'chat' ? <section className="flex min-h-[calc(100vh-12rem)] flex-col rounded-xl border border-zinc-800 bg-zinc-900/50">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3">
             <div className="flex min-w-0 items-center gap-2">
-              <span className="text-sm font-semibold text-zinc-200">Workspace chat</span>
-              {mentionedEndpoint !== undefined && <span className="rounded-full bg-violet-950 px-2 py-0.5 text-[11px] text-violet-200">@ routed to {mentionedEndpoint.displayName}</span>}
+              <span className="text-sm font-semibold text-zinc-200">{t('Workspace chat', '工作区聊天')}</span>
+              {effectiveEndpoint !== undefined && <span className="rounded-full bg-violet-950 px-2 py-0.5 text-[11px] text-violet-200">{t('Selected', '已选择')}：{endpointLabel(effectiveEndpoint)}</span>}
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <label className="text-[11px] text-zinc-500">Endpoint</label>
-              <select value={effectiveEndpointID} onChange={(event) => setSelectedEndpointID(event.target.value)} className="max-w-52 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-300">
-                {endpoints.map((endpoint) => <option key={endpoint.id} value={endpoint.id}>{endpointLabel(endpoint)}</option>)}
-              </select>
-              <button onClick={() => void interrupt()} disabled={!running} className="rounded-md bg-red-950/70 px-2.5 py-1 text-xs text-red-200 transition hover:bg-red-900 disabled:opacity-30">Interrupt</button>
+              <button onClick={() => void interrupt()} disabled={!running} className="rounded-md bg-red-950/70 px-2.5 py-1 text-xs text-red-200 transition hover:bg-red-900 disabled:opacity-30">{t('Interrupt', '中断')}</button>
             </div>
           </div>
 
           <div className="flex-1 space-y-4 overflow-y-auto p-4">
+            {activityItems.length > 0 && <RuntimeActivityTimeline items={activityItems} open={activityOpen} onToggle={() => setActivityOpen((current) => !current)} running={running} />}
             {chat?.entries.map((entry) => (
               <div key={entry.id} className={entry.authorKind === 'user' ? 'text-right' : ''}>
                 <div className="text-[11px] text-zinc-500">{entry.authorName}</div>
@@ -248,20 +280,34 @@ export function TaskDetailPage() {
             ))}
             {streamingText !== '' && (
               <div>
-                <div className="text-[11px] text-blue-300">{effectiveEndpoint?.displayName ?? 'Agent'} · streaming</div>
+                <div className="text-[11px] text-blue-300">{effectiveEndpoint?.displayName ?? 'Agent'} · {t('streaming', '流式输出')}</div>
                 <div className="mt-1 inline-block max-w-[92%] rounded-xl border border-blue-900/70 bg-blue-950/30 px-3 py-2 text-sm leading-6 text-zinc-100"><MarkdownMessage text={streamingText} /></div>
               </div>
             )}
-            {chat?.entries.length === 0 && streamingText === '' && <div className="py-12 text-center text-sm text-zinc-600">No messages yet. Mention @Codex or @Claude Code to route the first turn.</div>}
+            {chat?.entries.length === 0 && streamingText === '' && <div className="py-12 text-center text-sm text-zinc-600">{settings.language === 'zh-Hans' ? '还没有消息。点击下方 Runtime 选择执行对象，然后发送第一条消息。' : 'No messages yet. Choose a Runtime below, then send the first turn.'}</div>}
             <div ref={chatEndRef} />
           </div>
 
           <div className="border-t border-zinc-800 p-3">
+            <div className="mb-3 rounded-lg border border-violet-900/60 bg-violet-950/20 px-3 py-2 text-xs leading-5 text-violet-100">
+              {settings.language === 'zh-Hans'
+                ? '点击下方 Runtime 选择当前执行对象，再发送消息。Runtime 在 Agents 页面配置；底部齿轮也可打开设置。没有可用 Runtime 时，请先完成配置和检查。'
+                : 'Click a Runtime below to choose where this message runs. Configure runtimes in Agents; the bottom gear opens Settings. A Runtime must be active before sending.'}
+            </div>
+            <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2">
+              <span className="mr-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">Runtime</span>
+              {runnableEndpoints.map((endpoint) => {
+                const selected = endpoint.id === effectiveEndpointID
+                return <button key={endpoint.id} type="button" onClick={() => setSelectedEndpointID(endpoint.id)} className={`flex max-w-full items-center gap-2 rounded-full border px-3 py-1.5 text-xs transition ${selected ? 'border-violet-500/60 bg-violet-500/20 text-violet-100' : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200'}`} title={endpointLabel(endpoint)}><span className={`h-1.5 w-1.5 shrink-0 rounded-full ${selected ? 'bg-violet-300' : 'bg-emerald-400'}`} /><span className="max-w-64 truncate">{endpointLabel(endpoint)}</span><span className="text-[10px] opacity-70">{surfaceLabel(endpoint.instanceIdentity?.surfaceKind)}</span></button>
+              })}
+              {runnableEndpoints.length === 0 && <span className="text-xs text-zinc-600">{t('Configure and check a Runtime in Agents first.', '请先在 Agents 中配置并检查 Runtime。')}</span>}
+              <span className="ml-auto text-[11px] text-zinc-600">{t('Click to select · no @ needed', '点击选择 · 无需 @')}</span>
+            </div>
             <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
-              <span className="text-zinc-500">Reasoning</span>
+              <span className="text-zinc-500">{t('Reasoning', '思考强度')}</span>
               {EFFORTS.map((option) => (
                 <button key={option.value} type="button" title={option.hint} onClick={() => setEffort(option.value)} className={`rounded-full px-2.5 py-1 transition ${effort === option.value ? 'bg-violet-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'}`}>
-                  {option.label}{option.value === 'auto' && <span className="ml-1 text-[10px] opacity-70">({autoEffort})</span>}
+                  {effortText(settings.language, option.value)}{option.value === 'auto' && <span className="ml-1 text-[10px] opacity-70">({autoEffort})</span>}
                 </button>
               ))}
               <span className="ml-auto text-zinc-600">{selectedContextIDs.length} context item{selectedContextIDs.length === 1 ? '' : 's'} selected</span>
@@ -271,11 +317,11 @@ export function TaskDetailPage() {
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
                 onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() } }}
-                placeholder="Message the workspace… use @Codex or @Claude Code"
+                placeholder={settings.language === 'zh-Hans' ? '输入消息；先点击下方 Runtime 选择执行对象' : 'Message the workspace… click a Runtime below to choose where it runs'}
                 rows={2}
                 className="min-h-11 flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm outline-none ring-blue-500 focus:ring-1"
               />
-              <button onClick={() => void send()} disabled={sending || input.trim() === '' || effectiveEndpointID === ''} className="self-end rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-40">{sending ? 'Starting…' : 'Send'}</button>
+              <button onClick={() => void send()} disabled={sending || input.trim() === '' || effectiveEndpointID === '' || effectiveEndpoint?.status !== 'active'} title={effectiveEndpointID !== '' && effectiveEndpoint?.status === 'active' ? undefined : t('Configure and check a Runtime in Agents first.', '请先在 Agents 中配置并检查 Runtime。')} className="self-end rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:opacity-40">{sending ? t('Starting…', '启动中…') : t('Run', '执行')}</button>
             </div>
           </div>
         </section> : <WorkspaceSurfacePlaceholder surface={surface} repositoryPath={currentTask?.repositoryPath} artifacts={artifacts?.artifacts ?? []} />}
@@ -306,6 +352,145 @@ export function TaskDetailPage() {
       </div>
     </div>
   )
+}
+
+interface RuntimeActivityPayload {
+  readonly id?: string
+  readonly phase?: string
+  readonly status?: string
+  readonly title?: string
+  readonly detail?: string
+  readonly toolName?: string
+  readonly path?: string
+  readonly command?: string
+  readonly requestID?: string
+  readonly artifactID?: string
+}
+
+interface ActivityItem {
+  readonly id: string
+  readonly title: string
+  readonly detail?: string
+  readonly phase: string
+  readonly status: string
+  readonly occurredAt: string
+  readonly payload?: RuntimeActivityPayload
+  readonly live?: boolean
+}
+
+function mergeActivityItems(events: readonly LedgerEvent[], live: readonly ActivityItem[]): ActivityItem[] {
+  const items = events
+    .filter((event) => event.type === 'runtime.activity' || event.type === 'task.approval_requested' || event.type.startsWith('task.run_') || event.type.startsWith('artifact.'))
+    .map(activityItemFromLedger)
+  const byID = new Map<string, ActivityItem>()
+  for (const item of [...items, ...live]) byID.set(item.id, item)
+  return [...byID.values()]
+    .sort((left, right) => left.occurredAt.localeCompare(right.occurredAt))
+    .slice(-120)
+}
+
+function activityItemFromLedger(event: LedgerEvent): ActivityItem {
+  const payload = event.payload ?? {}
+  const phase = payload.phase ?? (event.type === 'task.approval_requested' ? 'authorization' : event.type.startsWith('artifact.') ? 'artifact' : 'status')
+  const status = payload.status ?? (event.type.endsWith('failed') ? 'failed' : event.type.endsWith('blocked') ? 'blocked' : event.type.endsWith('completed') ? 'completed' : 'updated')
+  const detail = payload.detail ?? payload.command ?? payload.path
+  return {
+    id: event.id,
+    title: event.summary,
+    detail,
+    phase,
+    status,
+    occurredAt: event.occurredAt,
+    payload,
+  }
+}
+
+function activityItemFromRuntime(activity: RuntimeActivityPayload, id: string): ActivityItem {
+  return {
+    id,
+    title: activity.title ?? 'Agent activity',
+    detail: activity.detail ?? activity.command ?? activity.path,
+    phase: activity.phase ?? 'status',
+    status: activity.status ?? 'updated',
+    occurredAt: new Date().toISOString(),
+    payload: activity,
+    live: true,
+  }
+}
+
+function RuntimeActivityTimeline({ items, open, onToggle, running }: { items: readonly ActivityItem[]; open: boolean; onToggle: () => void; running: boolean }) {
+  return <section className="rounded-xl border border-blue-900/50 bg-blue-950/10 p-3" aria-label="Agent activity timeline">
+    <button type="button" onClick={onToggle} className="flex w-full items-center gap-2 text-left">
+      <span className={`text-blue-300 transition ${open ? 'rotate-90' : ''}`}>›</span>
+      <span className={`h-2 w-2 rounded-full ${running ? 'animate-pulse bg-blue-400' : 'bg-zinc-500'}`} />
+      <span className="text-xs font-semibold text-zinc-200">Agent activity</span>
+      <span className="text-[10px] text-zinc-500">{items.length} events · visible receipts only</span>
+      <span className="ml-auto text-[10px] text-zinc-600">{open ? 'Collapse' : 'Expand'}</span>
+    </button>
+    {open && <div className="mt-3 ml-1 border-l border-blue-900/60 pl-3">
+      <div className="space-y-1.5">
+        {items.map((item, index) => <details key={`${item.id}-${index}`} open={item.live === true && index === items.length - 1} className="group rounded-lg border border-transparent px-2 py-1.5 transition hover:border-zinc-800 hover:bg-zinc-950/40">
+          <summary className="flex cursor-pointer list-none items-center gap-2 text-xs text-zinc-300 [&::-webkit-details-marker]:hidden">
+            <span className="w-5 text-center text-sm text-zinc-500">{activityIcon(item.phase)}</span>
+            <span className="min-w-0 flex-1 truncate">{item.title}</span>
+            <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] ${activityStatusClass(item.status)}`}>{item.status}</span>
+            <time className="shrink-0 text-[10px] text-zinc-600">{formatActivityTime(item.occurredAt)}</time>
+            <span className="text-[10px] text-zinc-600 transition group-open:rotate-90">›</span>
+          </summary>
+          {(item.detail !== undefined || item.payload?.toolName !== undefined || item.payload?.requestID !== undefined || item.payload?.artifactID !== undefined) && <div className="ml-7 mt-1 space-y-1 text-[11px] leading-5 text-zinc-500">
+            {item.detail !== undefined && <div className="whitespace-pre-wrap break-words">{item.detail}</div>}
+            {item.payload?.toolName !== undefined && <div><span className="text-zinc-600">Tool </span><code className="font-mono text-zinc-400">{item.payload.toolName}</code></div>}
+            {item.payload?.requestID !== undefined && <div><span className="text-zinc-600">Request </span><code className="font-mono text-zinc-400">{item.payload.requestID}</code></div>}
+            {item.payload?.artifactID !== undefined && <div><span className="text-zinc-600">Artifact </span><code className="font-mono text-zinc-400">{item.payload.artifactID}</code></div>}
+          </div>}
+        </details>)}
+      </div>
+    </div>}
+  </section>
+}
+
+function activityIcon(phase: string): string {
+  if (phase === 'file') return '▧'
+  if (phase === 'tool') return '⌘'
+  if (phase === 'authorization') return '⚿'
+  if (phase === 'artifact') return '◇'
+  if (phase === 'thinking') return '◌'
+  return '·'
+}
+
+function activityStatusClass(status: string): string {
+  if (status === 'completed') return 'bg-emerald-950 text-emerald-300'
+  if (status === 'blocked') return 'bg-amber-950 text-amber-300'
+  if (status === 'failed') return 'bg-red-950 text-red-300'
+  if (status === 'started' || status === 'updated') return 'bg-blue-950 text-blue-300'
+  return 'bg-zinc-800 text-zinc-500'
+}
+
+function effortText(language: 'en' | 'zh-Hans', value: string): string {
+  const labels: Record<string, [string, string]> = {
+    auto: ['Auto', '自动'],
+    medium: ['Medium', '中等'],
+    high: ['High', '高'],
+    ultra: ['Ultra', '极高'],
+  }
+  const label = labels[value]
+  return label === undefined ? value : text(language, label[0], label[1])
+}
+
+function surfaceText(language: 'en' | 'zh-Hans', value: string): string {
+  const labels: Record<string, [string, string]> = {
+    files: ['Files', '文件'],
+    browser: ['Browser', '浏览器'],
+    terminal: ['Terminal', '终端'],
+    artifacts: ['Review', '产物'],
+  }
+  const label = labels[value]
+  return label === undefined ? value : text(language, label[0], label[1])
+}
+
+function formatActivityTime(value: string): string {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
 function WorkspaceSurfacePlaceholder({ surface, repositoryPath, artifacts }: { surface: (typeof SURFACES)[number]['value']; repositoryPath?: string; artifacts: readonly { relativePath: string; byteCount: number }[] }) {
@@ -381,16 +566,6 @@ function MarkdownLines({ text }: { text: string }) {
 function inlineMarkdown(value: string): ReactNode {
   const chunks = value.split(/(`[^`]+`|\*\*[^*]+\*\*)/g)
   return chunks.map((chunk, index) => chunk.startsWith('`') && chunk.endsWith('`') ? <code key={index} className="rounded bg-zinc-950 px-1 py-0.5 font-mono text-[0.9em] text-blue-200">{chunk.slice(1, -1)}</code> : chunk.startsWith('**') && chunk.endsWith('**') ? <strong key={index}>{chunk.slice(2, -2)}</strong> : <span key={index}>{chunk}</span>)
-}
-
-function resolveMentionEndpoint(input: string, endpoints: Endpoint[]): Endpoint | undefined {
-  const lower = input.toLowerCase()
-  const explicit = lower.includes('@claude') ? 'claude_code' : lower.includes('@codex') ? 'codex' : undefined
-  if (explicit !== undefined) return endpoints.find((endpoint) => endpoint.instanceIdentity?.provider?.rawValue === explicit || endpoint.runtimeTypeID.toLowerCase().includes(explicit.replace('_', '-')))
-  return endpoints.find((endpoint) => {
-    const label = endpoint.displayName.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
-    return label !== '' && lower.includes(`@${label}`)
-  })
 }
 
 function endpointLabel(endpoint: Endpoint): string {

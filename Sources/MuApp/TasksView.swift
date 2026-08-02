@@ -26,8 +26,8 @@ struct TasksWorkspaceView: View {
             } else {
                 EmptyState(
                     symbol: "checklist",
-                    title: "No Task selected",
-                    message: "Choose a Task inside a Project, or create a new one."
+                    title: muText(store.interfaceLanguage, "No Task selected", "未选择任务"),
+                    message: muText(store.interfaceLanguage, "Choose a Task inside a Project, or create a new one.", "选择 Project 中的任务，或创建一个新任务。")
                 )
             }
         }
@@ -36,7 +36,7 @@ struct TasksWorkspaceView: View {
                 Button {
                     store.openNewTask()
                 } label: {
-                    Label("New Project", systemImage: "plus")
+                    Label(muText(store.interfaceLanguage, "New Project", "新建 Project"), systemImage: "plus")
                 }
             }
         }
@@ -116,7 +116,7 @@ struct TasksWorkspaceView: View {
         VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Projects")
+                    Text(muText(store.interfaceLanguage, "Projects", "Projects"))
                         .font(.title3.weight(.semibold))
                     Text(projectCountSummary)
                         .font(.caption)
@@ -133,8 +133,8 @@ struct TasksWorkspaceView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-                .help("New Project")
-                .accessibilityLabel("New Project")
+                .help(muText(store.interfaceLanguage, "New Project", "新建 Project"))
+                .accessibilityLabel(muText(store.interfaceLanguage, "New Project", "新建 Project"))
             }
             .padding(18)
 
@@ -143,8 +143,8 @@ struct TasksWorkspaceView: View {
             if projects.isEmpty {
                 EmptyState(
                     symbol: "tray",
-                    title: "No projects",
-                    message: "Create the first project to start the execution ledger."
+                    title: muText(store.interfaceLanguage, "No projects", "还没有 Projects"),
+                    message: muText(store.interfaceLanguage, "Create the first project to start the execution ledger.", "创建第一个 Project 以开始执行记录。")
                 )
             } else {
                 ScrollView {

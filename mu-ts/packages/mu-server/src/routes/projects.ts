@@ -22,6 +22,9 @@ interface EndpointBody {
   readonly displayName: string
   readonly runtimeVersion: string
   readonly location: string
+  readonly executablePath?: string
+  readonly surfaceKind?: string
+  readonly instanceLabel?: string
 }
 
 interface ProjectUpdateBody {
@@ -79,6 +82,14 @@ export function registerProjectsRoutes(app: FastifyInstance, ctx: RouteContext):
 
   app.get('/endpoints', async () => ({ endpoints: service.listEndpoints() }))
 
+  app.delete('/endpoints/:id', async (request: FastifyRequest<{ Params: { id: string } }>) => {
+    return { endpoint: service.removeEndpoint(request.params.id as never) }
+  })
+
+  app.post('/endpoints/cleanup-duplicates', async () => {
+    return { removedEndpointIDs: service.removeDuplicateDiscoveredEndpoints() }
+  })
+
   app.post('/endpoints', async (request: FastifyRequest<{ Body: EndpointBody }>, reply: FastifyReply) => {
     const body = request.body ?? {}
     if (typeof body.runtimeTypeID !== 'string' || body.runtimeTypeID === '') {
@@ -89,6 +100,17 @@ export function registerProjectsRoutes(app: FastifyInstance, ctx: RouteContext):
       displayName: body.displayName ?? body.runtimeTypeID,
       runtimeVersion: body.runtimeVersion ?? 'unknown',
       location: (body.location as 'local') ?? 'local',
+      nativeConfiguration: body.executablePath === undefined || body.executablePath.trim() === ''
+        ? undefined
+        : { executable: body.executablePath.trim() },
+      instanceIdentity: {
+        ...(body.surfaceKind === undefined ? {} : { surfaceKind: body.surfaceKind as never }),
+        ...(body.instanceLabel === undefined ? {} : { instanceLabel: body.instanceLabel.trim() }),
+        ...(body.executablePath === undefined ? {} : { executablePath: body.executablePath.trim() }),
+      },
+      status: body.runtimeTypeID === 'pi/coding-agent' || body.runtimeTypeID === 'opencode/cli'
+        ? 'offline'
+        : undefined,
     })
     return { endpoint }
   })

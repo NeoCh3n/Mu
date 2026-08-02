@@ -7,7 +7,7 @@ struct RuntimesView: View {
     @State private var showingOtherDiscovered = false
 
     private var primaryEndpoints: [RuntimeEndpoint] {
-        let useful = store.endpoints.filter { endpoint in
+        let useful = visibleRuntimeEndpoints.filter { endpoint in
             endpoint.status != .discovered
                 || endpoint.instanceIdentity != nil
                 || endpoint.nativeConfiguration != nil
@@ -17,9 +17,25 @@ struct RuntimesView: View {
 
     private var otherDiscoveredEndpoints: [RuntimeEndpoint] {
         let primaryIDs = Set(primaryEndpoints.map(\.id))
-        return store.endpoints
+        return visibleRuntimeEndpoints
             .filter { !primaryIDs.contains($0.id) }
             .sorted { $0.lastProbedAt > $1.lastProbedAt }
+    }
+
+    private var duplicateDiscoveredEndpoints: [RuntimeEndpoint] {
+        Dictionary(grouping: otherDiscoveredEndpoints, by: endpointDisplayKey)
+            .values
+            .flatMap { candidates in
+                candidates
+                    .sorted { $0.lastProbedAt > $1.lastProbedAt }
+                    .dropFirst()
+            }
+    }
+
+    private var visibleRuntimeEndpoints: [RuntimeEndpoint] {
+        store.endpoints.filter {
+            $0.provenance != .synthetic && $0.provenance != .artifactOnly
+        }
     }
 
     private func deduplicatedEndpoints(
@@ -74,10 +90,25 @@ struct RuntimesView: View {
                     SectionHeader(
                         title: "Runtime registry",
                         subtitle:
-                            "\(primaryEndpoints.count) useful endpoints · "
-                                + "\(otherDiscoveredEndpoints.count) other discoveries"
+                            "\(primaryEndpoints.count) useful · "
+                                + "\(otherDiscoveredEndpoints.count) unverified discoveries"
                     )
                     Spacer()
+                    if !duplicateDiscoveredEndpoints.isEmpty {
+                        Button {
+                            store.removeDuplicateDiscoveredEndpoints(
+                                duplicateDiscoveredEndpoints
+                            )
+                        } label: {
+                            Label(
+                                "Close \(duplicateDiscoveredEndpoints.count) duplicates",
+                                systemImage: "wand.and.stars"
+                            )
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(MuPalette.coral)
+                        .help("Keep the newest copy in each unverified discovery group.")
+                    }
                     Button {
                         store.isRegisteringRuntime = true
                     } label: {
@@ -87,7 +118,7 @@ struct RuntimesView: View {
                     .tint(MuPalette.violet)
                 }
 
-                if store.endpoints.isEmpty {
+                if visibleRuntimeEndpoints.isEmpty {
                     Panel {
                         EmptyState(
                             symbol: "point.3.connected.trianglepath.dotted",
@@ -142,25 +173,25 @@ struct RuntimesView: View {
                     .tint(.secondary)
                 }
 
-                Panel(title: "Capability contract", subtitle: "First-slice scheduling boundary") {
+                Panel(title: "How Mu decides what to show", subtitle: "A simple discovery rule") {
                     VStack(alignment: .leading, spacing: 12) {
                         contractRow(
-                            symbol: "checkmark.shield.fill",
+                            symbol: "magnifyingglass",
                             color: MuPalette.mint,
-                            title: "Capability-gated",
-                            message: "Start and Replan must be current before Mu proposes a receiving Handoff."
+                            title: "Found",
+                            message: "A local executable or desktop bundle exists, so Mu records a discovery."
                         )
                         contractRow(
-                            symbol: "exclamationmark.triangle.fill",
-                            color: MuPalette.coral,
-                            title: "Weaker guarantees stay visible",
-                            message: "Artifact-only bridges never imply live control, resume, permission interception, or quiescence."
+                            symbol: "checkmark.seal",
+                            color: MuPalette.violet,
+                            title: "Useful",
+                            message: "A stable instance identity or a successful probe makes it ready to use."
                         )
                         contractRow(
                             symbol: "arrow.triangle.2.circlepath",
-                            color: MuPalette.violet,
-                            title: "Runtime change means new Run",
-                            message: "A cross-runtime receiver must reconstruct a plan from the sealed Checkpoint."
+                            color: MuPalette.coral,
+                            title: "Duplicate",
+                            message: "Unverified copies with the same runtime name are grouped; cleanup keeps the newest one."
                         )
                     }
                 }
@@ -203,95 +234,29 @@ private struct RuntimeCard: View {
                         Text(endpoint.muInstanceDisplayName)
                             .font(.headline)
                             .lineLimit(1)
-                        Text(
-                            endpoint.muInstanceDisplayName == endpoint.displayName
-                                ? endpoint.runtimeTypeID
-                                : "\(endpoint.displayName) · \(endpoint.runtimeTypeID)"
-                        )
-                            .font(.caption.monospaced())
+                        Text(runtimePurpose)
+                            .font(.caption)
                             .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                            .lineLimit(2)
                     }
                     Spacer(minLength: 8)
                     StatusPill(
-                        label: endpoint.status.rawValue.capitalized,
+                        label: friendlyStatus,
                         color: statusColor,
                         symbol: endpoint.status == .active ? "checkmark" : nil
                     )
                     .fixedSize()
                 }
 
-                Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 10) {
-                    GridRow {
-                        metadata("VERSION", endpoint.runtimeVersion)
-                        metadata("PROVENANCE", endpoint.provenance.displayName)
-                    }
-                    GridRow {
-                        metadata(
-                            "SURFACE",
-                            endpoint.resolvedInstanceIdentity
-                                .surfaceKind.displayName
-                        )
-                        metadata("INSTANCE BASIS", instanceBasisLabel)
-                    }
-                    GridRow {
-                        metadata(
-                            "CONTROL",
-                            gateway.controlMode.rawValue
-                        )
-                        metadata(
-                            "TRUST",
-                            gateway.trustLevel.rawValue
-                        )
-                    }
-                    GridRow {
-                        metadata(
-                            "EVENTS",
-                            gateway.observationFidelity.rawValue
-                        )
-                        metadata(
-                            "CONNECTION",
-                            gateway.connectionKind.rawValue
-                        )
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                RuntimeInstanceIdentityLabel(
+                    identity: endpoint.resolvedInstanceIdentity,
+                    showsEvidence: false
+                )
 
-                if endpoint.capabilities.isEmpty {
-                    Label("No dispatch capabilities claimed", systemImage: "lock.shield")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(height: 28, alignment: .leading)
-                } else {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 6) {
-                            ForEach(
-                                endpoint.capabilities.sorted(by: { $0.rawValue < $1.rawValue }),
-                                id: \.self
-                            ) { capability in
-                                Text(capability.displayName)
-                                    .font(.caption2.weight(.semibold))
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 5)
-                                    .background(Color.primary.opacity(0.055), in: Capsule())
-                            }
-                        }
-                    }
-                    .frame(height: 28)
-                    .accessibilityLabel(
-                        "Capabilities: "
-                            + endpoint.capabilities
-                                .sorted(by: { $0.rawValue < $1.rawValue })
-                                .map(\.displayName)
-                                .joined(separator: ", ")
-                    )
-                }
-
-                Text(endpoint.guaranteeNote)
+                Label(runtimeActionHint, systemImage: endpoint.status == .active ? "checkmark.circle" : "info.circle")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2, reservesSpace: true)
+                    .lineLimit(2)
 
                 Spacer(minLength: 0)
                 Divider()
@@ -369,6 +334,44 @@ private struct RuntimeCard: View {
         )
     }
 
+    private var runtimePurpose: String {
+        let type = endpoint.runtimeTypeID.lowercased()
+        if type.contains("codex") {
+            return "Codex is available locally; check once to verify the account."
+        }
+        if type.contains("claude") {
+            return "Claude Code was found locally; check once to verify the terminal."
+        }
+        if type.contains("openworker") {
+            return "OpenWorker was found locally; check once to connect its desktop session."
+        }
+        if endpoint.provenance == .artifactOnly {
+            return "Evidence-only source; it can contribute files but cannot run a Task."
+        }
+        return endpoint.status == .active
+            ? "Verified local Runtime ready for Tasks."
+            : "A Runtime candidate found on this Mac."
+    }
+
+    private var runtimeActionHint: String {
+        if endpoint.status == .active {
+            return "Ready for a Task. Mu will use this endpoint when you choose it."
+        }
+        if endpoint.status == .discovered {
+            return "Found but not checked yet. Probe it before routing work."
+        }
+        return "Not ready for work yet. Check the Runtime or remove it."
+    }
+
+    private var friendlyStatus: String {
+        switch endpoint.status {
+        case .active: "Ready"
+        case .discovered: "Found"
+        case .probing: "Checking"
+        case .offline, .degraded, .quarantined: "Needs setup"
+        }
+    }
+
     private var isProbeable: Bool {
         endpoint.runtimeTypeID == ControlPlaneService.codexRuntimeTypeID
             || endpoint.runtimeTypeID
@@ -410,34 +413,6 @@ private struct RuntimeCard: View {
         }
     }
 
-    private var instanceBasisLabel: String {
-        let identity = endpoint.resolvedInstanceIdentity
-        return switch identity.identityBasis {
-        case .desktopSingleton: "One desktop"
-        case .terminalIdentifier:
-            identity.terminalIdentifier ?? "Terminal recorded"
-        case .sessionFallback: "Native session"
-        case .endpointFallback: "Runtime endpoint"
-        case .installation: "Installation"
-        case .unknown: "Not reported"
-        }
-    }
-
-    private var gateway: RuntimeGatewayManifest {
-        store.adapterRegistration(endpointID: endpoint.id)?
-            .manifest
-            ?? endpoint.gatewayManifest
-    }
-
-    private func metadata(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label)
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(.tertiary)
-            Text(value.replacingOccurrences(of: "_", with: " ").capitalized)
-                .font(.caption.weight(.medium))
-        }
-    }
 }
 
 private struct FlowLayout: Layout {

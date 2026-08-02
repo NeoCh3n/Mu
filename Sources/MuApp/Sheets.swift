@@ -29,7 +29,6 @@ struct NewTaskSheet: View {
             && !draft.objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !draft.repositoryPath.isEmpty
             && draft.sourceEndpointID != nil
-            && draft.agentIdentityID != nil
     }
 
     var body: some View {
@@ -142,9 +141,15 @@ struct NewTaskSheet: View {
                             .frame(height: 88)
                             .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
                     }
-                    fieldGroup("AGENT IDENTITY") {
+                    fieldGroup("AGENT IDENTITY · OPTIONAL") {
+                        Text(
+                            "Leave this unassigned to run as the local Runtime. Add an identity only when you want a reusable name or role."
+                        )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                         Picker("Agent identity", selection: $draft.agentIdentityID) {
-                            Text("Choose an agent").tag(UUID?.none)
+                            Text("Assign later (recommended)").tag(UUID?.none)
                             ForEach(store.selectableAgentIdentities) { agent in
                                 Text("\(agent.displayName) · \(agent.role.displayName)")
                                     .tag(Optional(agent.id))
@@ -164,15 +169,23 @@ struct NewTaskSheet: View {
                         }
                     }
                     fieldGroup("SOURCE RUNTIME") {
-                        Picker("Source runtime", selection: $draft.sourceEndpointID) {
-                            Text("Choose an endpoint").tag(UUID?.none)
-                            ForEach(store.initialTaskEndpoints) { endpoint in
-                                Text(endpoint.muRuntimePickerLabel)
-                                    .tag(Optional(endpoint.id))
+                        VStack(alignment: .leading, spacing: 9) {
+                            Text(
+                                "This selects the local LLM host for the first turn. Configure Codex, Claude Code, Pi, or OpenCode in Agents or from the bottom Settings button; in Workspace Chat, click a Runtime below the composer to choose later turns."
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            Picker("Source runtime", selection: $draft.sourceEndpointID) {
+                                Text("Choose an endpoint").tag(UUID?.none)
+                                ForEach(store.initialTaskEndpoints) { endpoint in
+                                    Text(endpoint.muRuntimePickerLabel)
+                                        .tag(Optional(endpoint.id))
+                                }
                             }
+                            .labelsHidden()
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .labelsHidden()
-                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     DisclosureGroup(
                         "Success criteria, constraints, and pending steps",
@@ -247,7 +260,6 @@ struct NewTaskSheet: View {
             }
             if draft.agentIdentityID == nil {
                 draft.agentIdentityID = store.preselectedAgentID
-                    ?? store.selectableAgentIdentities.first?.id
             }
             if draft.sourceEndpointID == nil {
                 let preferredID = store.agent(id: draft.agentIdentityID)?.preferredEndpointID
@@ -409,8 +421,8 @@ struct NewAgentSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             sheetHeader(
-                title: "Add agent identity",
-                subtitle: "Create a reusable Mu work profile independently from its runtime.",
+                title: "Add optional alias",
+                subtitle: "A Project can run without this. Add an alias only when you want a reusable @mention.",
                 symbol: "person.crop.square.badge.plus"
             )
             Divider()
@@ -428,17 +440,7 @@ struct NewAgentSheet: View {
                         }
                     }
 
-                    fieldGroup("ROLE") {
-                        Picker("Role", selection: $draft.role) {
-                            ForEach(AgentRole.allCases, id: \.self) { role in
-                                Text(role.displayName).tag(role)
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.segmented)
-                    }
-
-                    fieldGroup("SUMMARY") {
+                    fieldGroup("OPTIONAL NOTE") {
                         TextEditor(text: $draft.summary)
                             .accessibilityLabel("Agent summary")
                             .scrollContentBackground(.hidden)
@@ -539,7 +541,13 @@ struct NewAgentSheet: View {
 struct RegisterRuntimeSheet: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
-    @State private var draft = RegisterRuntimeDraft()
+    let provider: MuRuntimeProvider?
+    @State private var draft: RegisterRuntimeDraft
+
+    init(provider: MuRuntimeProvider? = nil) {
+        self.provider = provider
+        _draft = State(initialValue: RegisterRuntimeDraft(provider: provider))
+    }
 
     private let manualProvenance: [IntegrationProvenance] = [
         .vendorProtocol, .vendorSDK, .vendorCLI, .artifactOnly
@@ -553,27 +561,31 @@ struct RegisterRuntimeSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             sheetHeader(
-                title: "Register runtime",
-                subtitle: "Add an honest endpoint definition without pretending an adapter is live.",
+                title: provider.map { "Configure \($0.displayName)" } ?? "Register runtime",
+                subtitle: provider.map { _ in
+                    "Choose the local executable. Mu will explain whether this host is ready for Tasks."
+                } ?? "Add an honest endpoint definition without pretending an adapter is live.",
                 symbol: "point.3.connected.trianglepath.dotted"
             )
             Divider()
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    fieldGroup("DISPLAY NAME") {
+                    fieldGroup("RUNTIME") {
                         TextField("e.g. Pi RPC", text: $draft.displayName)
                             .textFieldStyle(.roundedBorder)
                     }
-                    fieldGroup("RUNTIME TYPE ID") {
-                        TextField(
-                            "vendor.runtime/adapter",
-                            text: $draft.runtimeTypeID
-                        )
-                        .textFieldStyle(.roundedBorder)
-                        Text("Stable namespace/adapter form, for example earendil.pi/coding-agent-rpc.")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                    if provider == nil {
+                        fieldGroup("RUNTIME TYPE ID") {
+                            TextField(
+                                "vendor.runtime/adapter",
+                                text: $draft.runtimeTypeID
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            Text("Stable namespace/adapter form, for example pi/coding-agent.")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
                     }
 
                     HStack(spacing: 14) {
@@ -681,8 +693,9 @@ struct RegisterRuntimeSheet: View {
 
                     Panel {
                         Label(
-                            "Manual definitions start Offline with zero capabilities. "
-                                + "A runtime-specific adapter and successful probe must promote them.",
+                            provider == nil
+                                ? "Manual definitions start Offline with zero capabilities."
+                                : "Mu records this local host first. A compatible adapter and successful check are required before routing a Task.",
                             systemImage: "lock.shield"
                         )
                         .font(.caption)
@@ -697,10 +710,11 @@ struct RegisterRuntimeSheet: View {
                 Spacer()
                 Button("Cancel") {
                     store.isRegisteringRuntime = false
+                    store.runtimeSetupProvider = nil
                     dismiss()
                 }
                 .keyboardShortcut(.cancelAction)
-                Button("Register runtime") {
+                Button(provider == nil ? "Register runtime" : "Save runtime") {
                     store.registerRuntime(from: draft)
                 }
                 .buttonStyle(.borderedProminent)
@@ -711,6 +725,15 @@ struct RegisterRuntimeSheet: View {
             .padding(18)
         }
         .frame(width: 700, height: 680)
+        .onAppear {
+            if draft.executablePath.isEmpty {
+                draft.executablePath = store.runtimeSetupExecutablePath
+            }
+        }
+        .onDisappear {
+            store.runtimeSetupProvider = nil
+            store.runtimeSetupExecutablePath = ""
+        }
     }
 
     private func chooseExecutable() {

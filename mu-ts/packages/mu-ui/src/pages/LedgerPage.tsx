@@ -1,12 +1,15 @@
 import { api } from '../api.ts'
-import { useQuery } from '../hooks.ts'
+import { useMuUISettings, useQuery } from '../hooks.ts'
+import { text } from '../i18n.ts'
 import { Empty, ErrorBanner, Page } from './ProjectsPage.tsx'
 
 export function LedgerPage() {
+  const { settings } = useMuUISettings()
+  const t = (english: string, simplifiedChinese: string) => text(settings.language, english, simplifiedChinese)
   const { data, error } = useQuery(() => api.listLedger())
 
   return (
-    <Page title="Ledger">
+    <Page title={t('Ledger', '事件记录')}>
       {error !== undefined && <ErrorBanner message={error} />}
       <div className="rounded-lg border border-zinc-800 bg-zinc-900">
         {data?.events.map((event) => (
@@ -19,7 +22,7 @@ export function LedgerPage() {
         ))}
         {data?.events.length === 0 && (
           <div className="p-6">
-            <Empty message="No ledger events yet." />
+            <Empty message={t('No ledger events yet.', '还没有事件记录。')} />
           </div>
         )}
       </div>

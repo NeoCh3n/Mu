@@ -3,27 +3,26 @@ import SwiftUI
 
 struct AgentsView: View {
     @EnvironmentObject private var store: AppStore
-    @State private var showingOtherIdentities = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 HStack(alignment: .bottom) {
                     SectionHeader(
-                        title: "Agent identities",
-                        subtitle: "Choose how work is framed; bind the runtime separately."
+                        title: muText(store.interfaceLanguage, "Agent identities · optional", "Agent 身份 · 可选"),
+                        subtitle: muText(store.interfaceLanguage, "Start with a local Runtime. Add a reusable identity only when it helps.", "先使用本地 Runtime。只有在有帮助时，才添加可复用身份。")
                     )
                     Spacer()
                     Button {
                         store.openNewTask()
                     } label: {
-                        Label("New project", systemImage: "plus")
+                        Label(muText(store.interfaceLanguage, "New project", "新建 Project"), systemImage: "plus")
                     }
                     .buttonStyle(.bordered)
                     Button {
                         store.isCreatingAgent = true
                     } label: {
-                        Label("Add agent", systemImage: "person.crop.circle.badge.plus")
+                        Label(muText(store.interfaceLanguage, "Add optional alias", "添加可选别名"), systemImage: "person.crop.circle.badge.plus")
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(MuPalette.violet)
@@ -40,43 +39,35 @@ struct AgentsView: View {
                                 in: RoundedRectangle(cornerRadius: 12)
                             )
                         VStack(alignment: .leading, spacing: 5) {
-                            Text("Identity is not runtime")
+                            Text(muText(store.interfaceLanguage, "You do not need to define an Agent first", "不需要先定义 Agent 身份"))
                                 .font(.headline)
                             Text(
-                                "Starter profiles and identities you add here are fully local and deletable. "
-                                    + "Each Task still names its actual endpoint, provenance, and guarantees."
+                                muText(store.interfaceLanguage, "Mu can run a Task directly on this Mac through the selected Runtime. Create an identity only when you want a reusable name, role, or @mention.", "Mu 可以通过选中的 Runtime 直接在本机运行任务。只有需要复用名称、角色或 @提及时，才创建身份。")
                             )
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                         }
                         Spacer()
                         StatusPill(
-                            label: "\(store.visibleAgentIdentities.count) shown",
+                            label: "\(store.visibleAgentIdentities.count) \(muText(store.interfaceLanguage, "shown", "个显示中"))",
                             color: MuPalette.mint,
                             symbol: "checkmark.seal"
                         )
-                        if !store.hiddenAgentIdentities.isEmpty {
-                            Text(
-                                "\(store.hiddenAgentIdentities.count) duplicate placeholders hidden"
-                            )
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                        }
                     }
                 }
 
-                if store.agents.isEmpty {
+                if store.visibleAgentIdentities.isEmpty {
                     Panel {
                         VStack(spacing: 14) {
                             EmptyState(
                                 symbol: "person.crop.circle.badge.plus",
-                                title: "No agent identities",
-                                message: "Add a work profile before creating an assigned Task."
+                                title: muText(store.interfaceLanguage, "No reusable identities", "没有可复用身份"),
+                                message: muText(store.interfaceLanguage, "This is valid. Start a Task with a Runtime and assign an identity only if needed.", "这是正常的。使用 Runtime 启动任务，只有需要时再分配身份。")
                             )
                             Button {
                                 store.isCreatingAgent = true
                             } label: {
-                                Label("Add first agent", systemImage: "plus")
+                            Label(muText(store.interfaceLanguage, "Add optional alias", "添加可选别名"), systemImage: "plus")
                             }
                             .buttonStyle(.borderedProminent)
                             .tint(MuPalette.violet)
@@ -94,50 +85,12 @@ struct AgentsView: View {
                         }
                     }
 
-                    if !store.hiddenAgentIdentities.isEmpty {
-                        DisclosureGroup(
-                            isExpanded: $showingOtherIdentities
-                        ) {
-                            VStack(alignment: .leading, spacing: 6) {
-                                ForEach(store.hiddenAgentIdentities) { agent in
-                                    HStack(spacing: 10) {
-                                        Image(systemName: "person.crop.circle.badge.questionmark")
-                                            .foregroundStyle(.secondary)
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(agent.displayName)
-                                                .font(.subheadline.weight(.medium))
-                                            Text(agent.id.uuidString.lowercased())
-                                                .font(.caption2.monospaced())
-                                                .foregroundStyle(.tertiary)
-                                                .lineLimit(1)
-                                                .truncationMode(.middle)
-                                        }
-                                        Spacer()
-                                        Button {
-                                            store.requestDelete(agent)
-                                        } label: {
-                                            Image(systemName: "trash")
-                                        }
-                                        .buttonStyle(.plain)
-                                        .foregroundStyle(.secondary)
-                                        .help("Delete \(agent.displayName)")
-                                        .accessibilityLabel("Delete \(agent.displayName)")
-                                    }
-                                    .padding(.vertical, 5)
-                                }
-                            }
-                            .padding(.top, 8)
-                        } label: {
-                            Label(
-                                "Other identities · \(store.hiddenAgentIdentities.count)",
-                                systemImage: "archivebox"
-                            )
-                            .font(.subheadline.weight(.semibold))
-                        }
-                        .tint(.secondary)
-                        .padding(.top, 4)
-                    }
                 }
+
+                Divider()
+                    .padding(.vertical, 4)
+
+                RuntimeProviderSetupView()
 
                 Divider()
                     .padding(.vertical, 4)
@@ -151,7 +104,7 @@ struct AgentsView: View {
                 Button {
                     store.reload()
                 } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
+                    Label(muText(store.interfaceLanguage, "Refresh", "刷新"), systemImage: "arrow.clockwise")
                 }
             }
         }

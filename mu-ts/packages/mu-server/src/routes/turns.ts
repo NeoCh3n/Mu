@@ -29,11 +29,13 @@ export function startTurn(
   const { service, hub } = ctx
   return new Promise<RunRecord>((resolve, reject) => {
     let settled = false
+    let createdRun: RunRecord | undefined
     const unsubscribe = hub.subscribe((envelope) => {
       if (envelope.event !== 'turn') return
       const data = envelope.data as { kind?: string; run?: RunRecord }
       if (data.kind === 'run_created' && data.run !== undefined) {
         settled = true
+        createdRun = data.run
         unsubscribe()
         resolve(data.run)
       }
@@ -58,7 +60,15 @@ export function startTurn(
             hub.publish('turn_event', { taskID: params.taskID, event })
           }
         }
-        hub.publish('turn_ended', { taskID: params.taskID })
+        const finalTask = service.fetchTask(params.taskID as never)
+        const finalRun = service.listRuns(params.taskID as never).find((candidate) => candidate.id === createdRun?.id) ?? createdRun
+        hub.publish('turn_ended', {
+          taskID: params.taskID,
+          runID: finalRun?.id,
+          status: finalTask?.status ?? finalRun?.state,
+          title: finalTask?.title ?? 'Project task',
+          endedAt: new Date().toISOString(),
+        })
       } catch (error) {
         if (!settled) {
           settled = true
@@ -68,6 +78,8 @@ export function startTurn(
         }
         hub.publish('turn_error', {
           taskID: params.taskID,
+          runID: createdRun?.id,
+          status: 'failed',
           error: error instanceof Error ? error.message : String(error),
         })
       }

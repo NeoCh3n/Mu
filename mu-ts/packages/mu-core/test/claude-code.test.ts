@@ -119,6 +119,24 @@ describe('ClaudeCodeStreamParser', () => {
     expect(parser.finish().visibleText).toBe('')
   })
 
+  it('emits safe activity receipts without copying private thinking text', () => {
+    const activities: Array<{ phase: string; title: string; detail?: string }> = []
+    const parser = new ClaudeCodeStreamParser(() => {}, (activity) => activities.push(activity))
+    parser.consume(line({
+      type: 'assistant',
+      message: {
+        id: 'msg_activity',
+        content: [
+          { type: 'tool_use', id: 'tool_read', name: 'Read', input: { file_path: 'Sources/App.swift' } },
+          { type: 'thinking', thinking: 'private reasoning that must not be copied' },
+        ],
+      },
+    }))
+    expect(activities.some((activity) => activity.phase === 'file' && activity.title.includes('Sources/App.swift'))).toBe(true)
+    const reasoning = activities.find((activity) => activity.phase === 'thinking')
+    expect(reasoning?.detail).not.toContain('private reasoning that must not be copied')
+  })
+
   it('tolerates malformed lines', () => {
     const parser = new ClaudeCodeStreamParser()
     parser.consume('not json\n')

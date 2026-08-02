@@ -4,7 +4,7 @@ import type { RuntimeEndpoint } from '../models.ts'
 import { toAgentHostAdapter } from '../host-adapter/harness-adapter.ts'
 import type { AgentRuntimeEndpointScope } from '../types.ts'
 import {
-  fetchEndpoints,
+  fetchRegisteredEndpoints,
   upsertEndpoint,
   upsertRuntimeAdapterRegistration,
 } from '../persistence/domain.ts'
@@ -35,7 +35,7 @@ export async function probeEndpoints(
 ): Promise<EndpointProbeOutcome[]> {
   const outcomes: EndpointProbeOutcome[] = []
   const host = toAgentHostAdapter(harness)
-  for (const endpoint of fetchEndpoints(store)) {
+  for (const endpoint of fetchRegisteredEndpoints(store)) {
     const scope: AgentRuntimeEndpointScope = {
       endpointID: endpoint.id,
       runtimeTypeID: endpoint.runtimeTypeID,

@@ -15,6 +15,7 @@ enum AppSection: String, CaseIterable, Identifiable {
     case overview
     case agents
     case tasks
+    case settings
 
     var id: String { rawValue }
 
@@ -23,6 +24,16 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .overview: "Overview"
         case .agents: "Agents"
         case .tasks: "Projects"
+        case .settings: "Settings"
+        }
+    }
+
+    func localizedTitle(for language: MuInterfaceLanguage) -> String {
+        switch self {
+        case .overview: muText(language, "Overview", "概览")
+        case .agents: muText(language, "Agents", "Agents")
+        case .tasks: muText(language, "Projects", "Projects")
+        case .settings: muText(language, "Settings", "设置")
         }
     }
 
@@ -31,8 +42,27 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .overview: "square.grid.2x2"
         case .agents: "person.2.crop.square.stack"
         case .tasks: "checklist"
+        case .settings: "gearshape"
         }
     }
+}
+
+enum MuInterfaceLanguage: String, CaseIterable, Identifiable {
+    case simplifiedChinese = "zh-Hans"
+    case english = "en"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .simplifiedChinese: "简体中文"
+        case .english: "English"
+        }
+    }
+}
+
+func muText(_ language: MuInterfaceLanguage, _ english: String, _ simplifiedChinese: String) -> String {
+    language == .simplifiedChinese ? simplifiedChinese : english
 }
 
 struct CreateTaskDraft {
@@ -81,6 +111,14 @@ struct RegisterRuntimeDraft {
     var permissionModel: PermissionModel = .unknown
     var executablePath = ""
     var notes = ""
+
+    init(provider: MuRuntimeProvider? = nil) {
+        guard let provider else { return }
+        displayName = provider.defaultDisplayName
+        runtimeTypeID = provider.runtimeTypeID
+        instanceLabel = provider.displayName
+        notes = provider.summary
+    }
 }
 
 enum RegistryDeletion: Identifiable {
@@ -117,8 +155,49 @@ struct HistoryImportRequest: Identifiable {
     var id: UUID { taskID }
 }
 
+struct CompletionToast: Identifiable, Equatable {
+    let id: UUID
+    let taskID: UUID
+    let message: String
+
+    init(taskID: UUID, message: String) {
+        self.id = UUID()
+        self.taskID = taskID
+        self.message = message
+    }
+}
+
 @MainActor
 final class AppStore: ObservableObject {
+    private static let seededStarterAgentIDs: Set<UUID> = [
+        ControlPlaneService.atlasAgentID,
+        ControlPlaneService.forgeAgentID,
+        ControlPlaneService.lensAgentID,
+        ControlPlaneService.scoutAgentID,
+        ControlPlaneService.relayAgentID
+    ]
+
+    private static let completionNotificationsKey =
+        "mu.notifications.taskCompletion.enabled"
+    private static let completionToastDurationKey =
+        "mu.notifications.taskCompletion.duration"
+    private static let interfaceLanguageKey = "mu.interfaceLanguage"
+    static let completionToastDurationOptions: [Double] = [2, 4, 6, 10, 15]
+
+    @Published var interfaceLanguage: MuInterfaceLanguage = {
+        let raw = UserDefaults.standard.string(
+            forKey: AppStore.interfaceLanguageKey
+        )
+        return MuInterfaceLanguage(rawValue: raw ?? "") ?? .english
+    }() {
+        didSet {
+            UserDefaults.standard.set(
+                interfaceLanguage.rawValue,
+                forKey: AppStore.interfaceLanguageKey
+            )
+        }
+    }
+
     @Published var section: AppSection = .overview
     @Published var tasks: [TaskRecord] = []
     @Published var projectPreferences: [ProjectPreference] = []
@@ -161,6 +240,8 @@ final class AppStore: ObservableObject {
     @Published var isCreatingTask = false
     @Published var isCreatingAgent = false
     @Published var isRegisteringRuntime = false
+    @Published var runtimeSetupProvider: MuRuntimeProvider?
+    @Published var runtimeSetupExecutablePath = ""
     @Published var pendingRegistryDeletion: RegistryDeletion?
     @Published var checkpointForHandoff: CheckpointRecord?
     @Published var handoffToReject: HandoffRecord?
@@ -185,6 +266,43 @@ final class AppStore: ObservableObject {
         [UUID: HistoryDiscoveryReport] = [:]
     @Published var isImportingHistory = false
     @Published var pendingTaskProjectPath: String?
+    @Published var completionToast: CompletionToast?
+    @Published var completionNotificationsEnabled: Bool =
+        UserDefaults.standard.object(
+            forKey: AppStore.completionNotificationsKey
+        ) as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(
+                completionNotificationsEnabled,
+                forKey: AppStore.completionNotificationsKey
+            )
+            if !completionNotificationsEnabled {
+                dismissCompletionToast()
+            }
+        }
+    }
+    @Published var completionToastDuration: Double = {
+        let stored = UserDefaults.standard.double(
+            forKey: AppStore.completionToastDurationKey
+        )
+        return AppStore.completionToastDurationOptions.contains(stored)
+            ? stored
+            : 4
+    }() {
+        didSet {
+            let normalized = AppStore.completionToastDurationOptions.contains(
+                completionToastDuration
+            ) ? completionToastDuration : 4
+            if normalized != completionToastDuration {
+                completionToastDuration = normalized
+                return
+            }
+            UserDefaults.standard.set(
+                normalized,
+                forKey: AppStore.completionToastDurationKey
+            )
+        }
+    }
 
     private(set) var service: ControlPlaneService?
     let workspaceService = WorkspaceService()
@@ -195,6 +313,7 @@ final class AppStore: ObservableObject {
     private var openWorkerLiveTextStates:
         [UUID: OpenWorkerLiveTextState] = [:]
     private var openWorkerStateRefreshTask: Task<Void, Never>?
+    private var completionToastDismissTask: Task<Void, Never>?
 
     init(service: ControlPlaneService? = nil) {
         do {
@@ -213,6 +332,45 @@ final class AppStore: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    func showCompletionToast(_ message: String, taskID: UUID) {
+        guard completionNotificationsEnabled else { return }
+        completionToastDismissTask?.cancel()
+        let notice = CompletionToast(taskID: taskID, message: message)
+        completionToast = notice
+        let duration = completionToastDuration
+        completionToastDismissTask = Task { [weak self, noticeID = notice.id] in
+            do {
+                try await Task.sleep(for: .seconds(duration))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled,
+                  let self,
+                  self.completionToast?.id == noticeID else {
+                return
+            }
+            self.completionToast = nil
+        }
+    }
+
+    func dismissCompletionToast() {
+        completionToastDismissTask?.cancel()
+        completionToastDismissTask = nil
+        completionToast = nil
+    }
+
+    private func announceTaskCompletion(
+        taskID: UUID,
+        agentName: String
+    ) {
+        let title = tasks.first(where: { $0.id == taskID })?.title
+            ?? "Project task"
+        showCompletionToast(
+            "\(agentName) completed “\(title)”.",
+            taskID: taskID
+        )
     }
 
     private func verifyOpenWorkerAndRestoreObservers() async {
@@ -355,6 +513,7 @@ final class AppStore: ObservableObject {
             $0.status == .active
                 && $0.capabilities.contains(.start)
                 && $0.provenance != .artifactOnly
+                && $0.provenance != .synthetic
         }
     }
 
@@ -408,20 +567,25 @@ final class AppStore: ObservableObject {
         return agents.first { $0.id == id }
     }
 
-    /// The registry can contain legacy/test-created placeholder identities
-    /// that are byte-for-byte duplicates of one another. Keep the primary
-    /// Agent surface focused on real identities while retaining every record
-    /// in the store and exposing the hidden set from the UI.
+    /// Starter identities remain readable for old Tasks and ledger records, but
+    /// they are not a required product concept. A new Task can run directly
+    /// through its local Runtime and may receive a reusable identity later.
     var visibleAgentIdentities: [AgentIdentity] {
-        agents.filter { !isSyntheticPlaceholderAgent($0) }
+        agents.filter {
+            !Self.seededStarterAgentIDs.contains($0.id)
+                && !isSyntheticPlaceholderAgent($0)
+        }
     }
 
     var hiddenAgentIdentities: [AgentIdentity] {
-        agents.filter(isSyntheticPlaceholderAgent)
+        agents.filter {
+            Self.seededStarterAgentIDs.contains($0.id)
+                || isSyntheticPlaceholderAgent($0)
+        }
     }
 
     var selectableAgentIdentities: [AgentIdentity] {
-        visibleAgentIdentities.isEmpty ? agents : visibleAgentIdentities
+        visibleAgentIdentities
     }
 
     private func isSyntheticPlaceholderAgent(_ agent: AgentIdentity) -> Bool {
@@ -1209,6 +1373,15 @@ final class AppStore: ObservableObject {
         isCreatingTask = true
     }
 
+    func openRuntimeSetup(
+        _ provider: MuRuntimeProvider,
+        executablePath: String? = nil
+    ) {
+        runtimeSetupProvider = provider
+        runtimeSetupExecutablePath = executablePath ?? ""
+        isRegisteringRuntime = true
+    }
+
     func openNewTask(projectPath: String) {
         let path = standardizedProjectPath(projectPath)
         guard service != nil else {
@@ -1234,10 +1407,6 @@ final class AppStore: ObservableObject {
             standardizedProjectPath($0.path) == path
         }?.tasks.first
         let agentID = existingTask?.assignedAgentIdentityID
-            ?? visibleAgentIdentities.first(where: {
-                $0.preferredEndpointID == endpoint.id
-            })?.id
-            ?? selectableAgentIdentities.first?.id
         let draft = CreateTaskDraft(
             title: "New task",
             objective: "Start working in \(projectName).",
@@ -1272,13 +1441,18 @@ final class AppStore: ObservableObject {
         WorkspacePathIdentity.canonicalPath(path)
     }
 
-    func sendChat(taskID: UUID, text: String) {
+    func sendChat(
+        taskID: UUID,
+        text: String,
+        endpointID: UUID? = nil
+    ) {
         guard let service else { return }
         autoSummarizeTaskTitle(taskID: taskID, firstMessage: text)
         do {
             let prepared = try service.prepareWorkspaceMessage(
                 taskID: taskID,
-                text: text
+                text: text,
+                selectedEndpointID: endpointID
             )
             reload()
             guard let route = prepared.route else {
@@ -1439,9 +1613,20 @@ final class AppStore: ObservableObject {
                 reload()
                 switch result {
                 case .success(let status):
-                    transientMessage =
-                        "\(provider.displayName) finished with status \(status); "
-                        + "the result is available for Project review."
+                    if status == "completed" {
+                        transientMessage = nil
+                        if let runID,
+                           let taskID = runs.first(where: { $0.id == runID })?.taskID {
+                            announceTaskCompletion(
+                                taskID: taskID,
+                                agentName: provider.displayName
+                            )
+                        }
+                    } else {
+                        transientMessage =
+                            "\(provider.displayName) finished with status \(status); "
+                            + "the result is available for Project review."
+                    }
                 case .failure(let error):
                     errorMessage = error.localizedDescription
                 }
@@ -1500,6 +1685,20 @@ final class AppStore: ObservableObject {
 
     func requestDelete(_ endpoint: RuntimeEndpoint) {
         pendingRegistryDeletion = .endpoint(endpoint)
+    }
+
+    func removeDuplicateDiscoveredEndpoints(_ endpoints: [RuntimeEndpoint]) {
+        guard let service, !endpoints.isEmpty else { return }
+        do {
+            for endpoint in endpoints {
+                try service.deleteEndpoint(id: endpoint.id)
+            }
+            reload()
+            transientMessage =
+                "Removed \(endpoints.count) duplicate discoveries; the newest copy was kept."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     func confirmRegistryDeletion() {
@@ -1737,9 +1936,16 @@ final class AppStore: ObservableObject {
                 self.reload()
                 switch result {
                 case .success(let receipt):
-                    self.transientMessage = receipt.status == "completed"
-                        ? "Codex completed the native read-only run; receipts are in Chat, Artifacts, and Ledger."
-                        : "Codex ended with status \(receipt.status). Review the Task receipt."
+                    if receipt.status == "completed" {
+                        self.transientMessage = nil
+                        announceTaskCompletion(
+                            taskID: run.taskID,
+                            agentName: "Codex"
+                        )
+                    } else {
+                        self.transientMessage =
+                            "Codex ended with status \(receipt.status). Review the Task receipt."
+                    }
                 case .failure(let error):
                     self.errorMessage = error.localizedDescription
                 }
@@ -1794,10 +2000,18 @@ final class AppStore: ObservableObject {
                 reload()
                 switch result {
                 case .success(let receipt):
-                    transientMessage =
-                        receipt.status == "cancelled"
-                        ? "Claude Code was interrupted; its partial receipt is preserved."
-                        : "Claude Code completed; its result is a reviewable Project Artifact."
+                    if receipt.status == "completed" {
+                        transientMessage = nil
+                        announceTaskCompletion(
+                            taskID: run.taskID,
+                            agentName: "Claude Code"
+                        )
+                    } else {
+                        transientMessage =
+                            receipt.status == "cancelled"
+                            ? "Claude Code was interrupted; its partial receipt is preserved."
+                            : "Claude Code ended with status \(receipt.status). Review the Task receipt."
+                    }
                 case .failure(let error):
                     errorMessage = error.localizedDescription
                 }
@@ -2250,6 +2464,17 @@ final class AppStore: ObservableObject {
                 _ = try? await service.syncOpenWorkerSessionReportingChanges(
                     bindingID: bindingID
                 )
+                if let binding = try? service.store.fetchRuntimeSessionBinding(
+                    id: bindingID
+                ),
+                   let task = try? service.store.fetchTask(id: binding.taskID),
+                   task.status == .completed {
+                    transientMessage = nil
+                    announceTaskCompletion(
+                        taskID: binding.taskID,
+                        agentName: "OpenWorker"
+                    )
+                }
                 dispatchingSessionBindingIDs.remove(bindingID)
                 openWorkerLiveTextStates.removeValue(
                     forKey: bindingID

@@ -16,6 +16,16 @@ enum WorkspaceSurface: String, CaseIterable, Identifiable {
         self == .artifacts ? "Review" : rawValue.capitalized
     }
 
+    func localizedTitle(for language: MuInterfaceLanguage) -> String {
+        switch self {
+        case .chat: muText(language, "Chat", "聊天")
+        case .files: muText(language, "Files", "文件")
+        case .browser: muText(language, "Browser", "浏览器")
+        case .terminal: muText(language, "Terminal", "终端")
+        case .artifacts: muText(language, "Review", "产物")
+        }
+    }
+
     var symbol: String {
         switch self {
         case .chat: "bubble.left.and.bubble.right"
@@ -88,7 +98,7 @@ struct AgentWorkspaceView: View {
                     if let agent = store.agent(id: task.assignedAgentIdentityID) {
                         Text("\(agent.displayName) · \(agent.role.displayName)")
                     } else {
-                        Text("Unassigned identity")
+                        Text(muText(store.interfaceLanguage, "Unassigned identity", "未分配身份"))
                     }
                     Text("•")
                     EndpointBadge(
@@ -108,10 +118,10 @@ struct AgentWorkspaceView: View {
                     HStack(spacing: 7) {
                         ProgressView()
                             .controlSize(.small)
-                        Text("Capturing…")
+                        Text(muText(store.interfaceLanguage, "Capturing…", "捕获中…"))
                     }
                 } else {
-                    Label("Capture checkpoint", systemImage: "seal")
+                    Label(muText(store.interfaceLanguage, "Capture checkpoint", "捕获检查点"), systemImage: "seal")
                 }
             }
             .buttonStyle(.borderedProminent)
@@ -131,7 +141,7 @@ struct AgentWorkspaceView: View {
             Button {
                 surface = .chat
             } label: {
-                Label("Chat", systemImage: WorkspaceSurface.chat.symbol)
+                Label(muText(store.interfaceLanguage, "Chat", "聊天"), systemImage: WorkspaceSurface.chat.symbol)
                     .font(.caption.weight(.semibold))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
@@ -146,12 +156,12 @@ struct AgentWorkspaceView: View {
             .foregroundStyle(surface == .chat ? MuPalette.violet : .secondary)
 
             Menu {
-                Section("Workspace tools") {
+                Section(muText(store.interfaceLanguage, "Workspace tools", "工作区工具")) {
                     ForEach(WorkspaceSurface.allCases.filter { $0 != .chat }) { item in
                         Button {
                             surface = item
                         } label: {
-                            Label(item.title, systemImage: item.symbol)
+                            Label(item.localizedTitle(for: store.interfaceLanguage), systemImage: item.symbol)
                         }
                     }
                 }
@@ -161,10 +171,10 @@ struct AgentWorkspaceView: View {
                         showingEnvironment = true
                     }
                 } label: {
-                    Label("Environment", systemImage: "sidebar.right")
+                    Label(muText(store.interfaceLanguage, "Environment", "环境"), systemImage: "sidebar.right")
                 }
             } label: {
-                Label("Tools", systemImage: "square.grid.2x2")
+                Label(muText(store.interfaceLanguage, "Tools", "工具"), systemImage: "square.grid.2x2")
                     .font(.caption.weight(.semibold))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 7)
@@ -179,7 +189,7 @@ struct AgentWorkspaceView: View {
                 }
             } label: {
                 Label(
-                    showingEnvironment ? "Hide Environment" : "Environment",
+                    showingEnvironment ? muText(store.interfaceLanguage, "Hide Environment", "隐藏环境") : muText(store.interfaceLanguage, "Environment", "环境"),
                     systemImage: showingEnvironment ? "sidebar.right" : "sidebar.right"
                 )
                 .font(.caption.weight(.semibold))
@@ -228,8 +238,10 @@ private struct WorkspaceChatSurface: View {
     @EnvironmentObject private var store: AppStore
     let task: TaskRecord
     @State private var message = ""
+    @State private var selectedRuntimeID: UUID?
     @State private var isImportedContextExpanded = true
     @State private var isPresentingHistoryFlow = false
+    @State private var isActivityExpanded = true
 
     private var entries: [ChatEntry] {
         store.chat(for: task.id)
@@ -299,6 +311,23 @@ private struct WorkspaceChatSurface: View {
         store.pendingInteractions(for: task.id)
     }
 
+    private var runtimeActivityEvents: [LedgerEvent] {
+        store.events(for: task.id)
+            .filter { event in
+                event.type == "runtime.activity"
+                    || event.type == "task.approval_requested"
+                    || event.type.hasPrefix("task.run_")
+                    || event.type.hasPrefix("artifact.")
+                    || event.type.hasPrefix("runtime.interaction")
+                    || event.type.hasPrefix("runtime.session")
+                    || event.type.hasPrefix("codex.")
+                    || event.type.hasPrefix("claude.")
+            }
+            .sorted { $0.occurredAt < $1.occurredAt }
+            .suffix(120)
+            .map { $0 }
+    }
+
     private func activity(for binding: RuntimeSessionBinding) -> [LedgerEvent] {
         var summaries = Set([binding.lastActivitySummary])
         return Array(
@@ -321,8 +350,9 @@ private struct WorkspaceChatSurface: View {
                     Text("Workspace chat")
                         .font(.headline)
                     Text(
-                        "Use @Agent, @Codex, @Claude, or @OpenWorker "
-                            + "to route a bounded Project message."
+                        store.interfaceLanguage == .simplifiedChinese
+                            ? "先在消息框下方点击一个 Runtime，再发送消息。选中的 Codex、Claude Code 等会直接收到这条任务；没有选择时只是本地笔记。"
+                            : "Click a Runtime below the composer before sending. The selected Codex, Claude Code, or other host receives the task; with no selection, the message stays a local note."
                     )
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -378,7 +408,7 @@ private struct WorkspaceChatSurface: View {
                         bindings.count > 1
                             ? "\(bindings.count) sessions · \($0.state.displayName)"
                             : $0.state.displayName
-                    } ?? "Local until @mentioned",
+                    } ?? "Local until a Runtime is selected",
                     color: primaryBinding.map(bindingColor) ?? MuPalette.mint,
                     symbol: primaryBinding?.state == .working ? "bolt.fill" : "lock.doc"
                 )
@@ -415,11 +445,18 @@ private struct WorkspaceChatSurface: View {
                 EmptyState(
                     symbol: "bubble.left",
                     title: "No workspace messages",
-                    message: "Write a local note, or mention @OpenWorker / a routed Agent to start work."
+                    message: "Choose a Runtime below to start work, or send a local note without selecting one."
                 )
             } else {
                 ScrollView {
                     LazyVStack(spacing: 14) {
+                        if !runtimeActivityEvents.isEmpty {
+                            NativeRuntimeActivityTimeline(
+                                events: runtimeActivityEvents,
+                                isExpanded: $isActivityExpanded,
+                                isRunning: task.status == .running
+                            )
+                        }
                         if !importedConversations.isEmpty {
                             ImportedContextPanel(
                                 task: task,
@@ -454,31 +491,75 @@ private struct WorkspaceChatSurface: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 7) {
-                    ForEach(
-                        routeableRuntimeMentions,
-                        id: \.self
-                    ) { mention in
-                        Button("@\(mention)") {
-                            insertMention("@\(mention)")
+                    Text(
+                        store.interfaceLanguage == .simplifiedChinese
+                            ? "选择当前 Runtime"
+                            : "Choose current Runtime"
+                    )
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    ForEach(selectableRuntimeEndpoints) { endpoint in
+                        let isSelected = selectedRuntime?.id == endpoint.id
+                        Button {
+                            selectedRuntimeID = endpoint.id
+                        } label: {
+                            HStack(spacing: 5) {
+                                Circle()
+                                    .fill(isSelected ? Color.white : endpointChoiceColor(endpoint))
+                                    .frame(width: 6, height: 6)
+                                Text(endpoint.muRuntimePickerLabel)
+                                    .lineLimit(1)
+                                Text(endpoint.resolvedInstanceIdentity.surfaceKind.displayName)
+                                    .font(.caption2)
+                                    .foregroundStyle(isSelected ? .white.opacity(0.75) : .secondary)
+                            }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(
+                                isSelected
+                                    ? MuPalette.violet
+                                    : Color.primary.opacity(0.055),
+                                in: Capsule()
+                            )
+                            .overlay {
+                                Capsule()
+                                    .strokeBorder(
+                                        isSelected
+                                            ? MuPalette.violet.opacity(0.9)
+                                            : Color.primary.opacity(0.12)
+                                    )
+                            }
                         }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
+                        .buttonStyle(.plain)
+                        .help(
+                            store.interfaceLanguage == .simplifiedChinese
+                                ? "点击后，下一条消息直接发送到 \(endpoint.muInstanceDisplayName)"
+                                : "Send the next message directly to \(endpoint.muInstanceDisplayName)"
+                        )
                     }
-                    ForEach(routeableAgents.prefix(4)) { agent in
-                        Button("@\(agent.displayName)") {
-                            insertMention("@\(agent.displayName)")
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
+                    if selectableRuntimeEndpoints.isEmpty {
+                        Text(
+                            store.interfaceLanguage == .simplifiedChinese
+                                ? "还没有可执行 Runtime；请先在 Agents 中配置并检查。"
+                                : "No active Runtime yet; configure and check one in Agents."
+                        )
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
                     }
                     Spacer()
-                    Text("No mention = local note")
+                    Text(
+                        store.interfaceLanguage == .simplifiedChinese
+                            ? "点击后直接选择，不需要 @"
+                            : "Click to choose; no @ needed"
+                    )
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
                 HStack(alignment: .bottom, spacing: 10) {
                     TextField(
-                        "Message this workspace or @Agent to delegate",
+                        store.interfaceLanguage == .simplifiedChinese
+                            ? "输入消息；先点击下方 Runtime 选择执行对象"
+                            : "Message this workspace; click a Runtime below to choose where it runs",
                         text: $message,
                         axis: .vertical
                     )
@@ -487,7 +568,7 @@ private struct WorkspaceChatSurface: View {
                     .onSubmit(send)
                     Button(action: send) {
                         Label(
-                            message.contains("@") ? "Route" : "Send",
+                            selectedRuntime == nil ? "Note" : "Run",
                             systemImage: "paperplane.fill"
                         )
                     }
@@ -525,6 +606,9 @@ private struct WorkspaceChatSurface: View {
                 isPresentingHistoryFlow = true
             }
         }
+        .onAppear {
+            selectDefaultRuntimeIfNeeded()
+        }
     }
 
     private var hasStreamingOutput: Bool {
@@ -533,68 +617,58 @@ private struct WorkspaceChatSurface: View {
         }
     }
 
-    private var routeableRuntimeMentions:
-        [String] {
-        let endpoints = store.endpoints.filter {
+    private var selectableRuntimeEndpoints: [RuntimeEndpoint] {
+        store.endpoints.filter {
             $0.status == .active
                 && $0.gatewayManifest.supports(
                     .submitInput,
                     endpointIsActive: true
                 )
+        }.sorted {
+            $0.muRuntimePickerLabel.localizedCaseInsensitiveCompare(
+                $1.muRuntimePickerLabel
+            ) == .orderedAscending
         }
-        let codex = endpoints.filter {
-            $0.runtimeTypeID
-                == ControlPlaneService.codexRuntimeTypeID
-        }
-        let claude = endpoints.filter {
-            $0.runtimeTypeID
-                == ControlPlaneService
-                .claudeCodeRuntimeTypeID
-        }
-        var values = codex.map {
-            codex.count == 1
-                ? "Codex"
-                : "codex-"
-                    + $0.id.uuidString
-                    .lowercased().prefix(8)
-        }
-        values.append(contentsOf: claude.map {
-            claude.count == 1
-                ? "Claude"
-                : "claude-"
-                    + $0.id.uuidString
-                    .lowercased().prefix(8)
-        })
-        if endpoints.contains(where: {
-            $0.runtimeTypeID
-                == ControlPlaneService
-                .openWorkerRuntimeTypeID
-        }) {
-            values.append("OpenWorker")
-        }
-        return values.sorted()
     }
 
-    private var routeableAgents: [AgentIdentity] {
-        store.agents.filter { agent in
-            guard let endpoint = store.registeredEndpoint(id: agent.preferredEndpointID) else {
-                return false
-            }
-            return endpoint.status == .active
-                && endpoint.capabilities.contains(.continueRun)
-                && endpoint.capabilities.contains(.streamEvents)
+    private var selectedRuntime: RuntimeEndpoint? {
+        if let selectedRuntimeID,
+           let endpoint = selectableRuntimeEndpoints.first(where: {
+               $0.id == selectedRuntimeID
+           }) {
+            return endpoint
         }
+        if let current = task.currentEndpointID,
+           let endpoint = selectableRuntimeEndpoints.first(where: {
+               $0.id == current
+           }) {
+            return endpoint
+        }
+        return selectableRuntimeEndpoints.first
     }
 
     private func send() {
         let value = message
         message = ""
-        store.sendChat(taskID: task.id, text: value)
+        store.sendChat(
+            taskID: task.id,
+            text: value,
+            endpointID: selectedRuntime?.id
+        )
     }
 
-    private func insertMention(_ mention: String) {
-        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
-        message = trimmed.isEmpty ? "\(mention) " : "\(mention) \(trimmed)"
+    private func selectDefaultRuntimeIfNeeded() {
+        guard selectedRuntimeID == nil else { return }
+        selectedRuntimeID = selectedRuntime?.id
+    }
+
+    private func endpointChoiceColor(_ endpoint: RuntimeEndpoint) -> Color {
+        switch endpoint.resolvedInstanceIdentity.provider {
+        case .codex: .blue
+        case .claudeCode: MuPalette.violet
+        case .openWorker: MuPalette.coral
+        default: MuPalette.mint
+        }
     }
 
     private func bindingColor(_ binding: RuntimeSessionBinding) -> Color {
@@ -1063,6 +1137,144 @@ private enum MarkdownBlock: Hashable {
         }
         return compact.allSatisfy { $0 == first }
     }
+}
+
+private struct NativeRuntimeActivityTimeline: View {
+    let events: [LedgerEvent]
+    @Binding var isExpanded: Bool
+    let isRunning: Bool
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(events) { event in
+                    NativeRuntimeActivityRow(event: event)
+                }
+            }
+            .padding(.top, 7)
+        } label: {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(isRunning ? MuPalette.violet : Color.secondary)
+                    .frame(width: 7, height: 7)
+                    .overlay {
+                        if isRunning {
+                            Circle()
+                                .stroke(MuPalette.violet.opacity(0.32), lineWidth: 5)
+                        }
+                    }
+                Text("Agent activity")
+                    .font(.subheadline.weight(.semibold))
+                Text("\(events.count) events")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("Visible receipts only")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(13)
+        .background(
+            Color.accentColor.opacity(0.055),
+            in: RoundedRectangle(cornerRadius: 12)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(Color.accentColor.opacity(0.16))
+        }
+    }
+}
+
+private struct NativeRuntimeActivityRow: View {
+    let event: LedgerEvent
+    @State private var isExpanded = false
+
+    private var phase: String {
+        event.payload["phase"] ?? (event.type == "task.approval_requested" ? "authorization" : event.type.hasPrefix("artifact.") ? "artifact" : "status")
+    }
+
+    private var status: String {
+        event.payload["status"] ?? (event.type.hasSuffix("failed") ? "failed" : event.type.hasSuffix("blocked") ? "blocked" : event.type.hasSuffix("completed") ? "completed" : "updated")
+    }
+
+    private var detail: String? {
+        let value = event.payload["detail"] ?? event.payload["command"] ?? event.payload["path"]
+        guard let value, !value.isEmpty else { return nil }
+        return redactedActivityText(value)
+    }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 4) {
+                if let detail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                if let tool = event.payload["tool_name"] {
+                    Text("Tool · \(tool)")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                }
+                if let request = event.payload["request_id"] {
+                    Text("Request · \(request)")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .padding(.leading, 31)
+            .padding(.vertical, 4)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: activitySymbol(for: phase))
+                    .font(.caption)
+                    .foregroundStyle(activityColor(for: status))
+                    .frame(width: 18)
+                Text(event.summary)
+                    .font(.caption)
+                    .lineLimit(2)
+                Spacer(minLength: 6)
+                Text(status)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(activityColor(for: status))
+                Text(event.occurredAt, style: .time)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 5)
+        .padding(.vertical, 5)
+        .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private func activitySymbol(for phase: String) -> String {
+    switch phase {
+    case "file": "doc.text"
+    case "tool": "terminal"
+    case "authorization": "lock"
+    case "artifact": "shippingbox"
+    case "thinking": "circle.dotted"
+    default: "ellipsis.circle"
+    }
+}
+
+private func activityColor(for status: String) -> Color {
+    switch status {
+    case "completed": .green
+    case "blocked": .orange
+    case "failed": .red
+    case "started", "updated": MuPalette.violet
+    default: .secondary
+    }
+}
+
+private func redactedActivityText(_ value: String) -> String {
+    value
+        .replacingOccurrences(of: #"(?i)(sk|key|token|secret)[-_][A-Za-z0-9._-]+"#, with: "[redacted]", options: .regularExpression)
+        .replacingOccurrences(of: #"(?i)Bearer\s+[A-Za-z0-9._-]+"#, with: "Bearer [redacted]", options: .regularExpression)
 }
 
 private struct ImportedContextPanel: View {

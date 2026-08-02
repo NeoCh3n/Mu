@@ -12,6 +12,7 @@ import type {
 } from '../conversation-history.ts'
 import { canonicalWorkspacePath } from '../conversation-history.ts'
 import { encodeMuJSON } from '../hashing.ts'
+import type { HarnessActivityEvent } from '../harness/types.ts'
 
 // ---------------------------------------------------------------------------
 // Internal protocol types
@@ -37,6 +38,74 @@ type JsonObject = Record<string, unknown>
 const TURN_READ_FALLBACK_INTERVAL_MS = 2000
 const TURN_READ_FALLBACK_TIMEOUT_MS = 2000
 
+function safeActivityText(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const normalized = value
+    .replace(/(?:sk|key|token|secret)[-_][A-Za-z0-9._-]+/gi, '[redacted]')
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [redacted]')
+    .trim()
+  if (normalized === '') return undefined
+  return normalized.length > 240 ? `${normalized.slice(0, 237)}…` : normalized
+}
+
+function codexActivity(
+  item: JsonObject,
+  status: HarnessActivityEvent['status'],
+): HarnessActivityEvent | undefined {
+  const type = nonEmptyString(item['type']) ?? ''
+  const id = nonEmptyString(item['id'])
+  const command = safeActivityText(item['command'] ?? item['cmd'])
+  const pathValue = safeActivityText(item['filePath'] ?? item['file_path'] ?? item['path'])
+  const toolName = safeActivityText(item['name'] ?? item['toolName'] ?? item['tool_name'])
+  if (/reasoning/i.test(type)) {
+    return {
+      id,
+      phase: 'thinking',
+      status,
+      title: 'Agent reasoning',
+      detail: 'Codex reported a reasoning phase; private reasoning text is not copied into Mu.',
+    }
+  }
+  if (/plan/i.test(type)) {
+    return { id, phase: 'status', status, title: 'Plan updated' }
+  }
+  if (/file(change|_change)|patch/i.test(type) || pathValue !== undefined) {
+    const verb = status === 'completed' ? 'Read' : status === 'failed' ? 'Failed' : 'Reading'
+    return {
+      id,
+      phase: 'file',
+      status,
+      title: `${verb} ${pathValue ?? 'workspace files'}`,
+      path: pathValue,
+      detail: toolName === undefined ? undefined : `Tool: ${toolName}`,
+      toolName,
+    }
+  }
+  if (/command|terminal|shell|exec/i.test(type) || command !== undefined) {
+    const verb = status === 'completed' ? 'Ran' : status === 'failed' ? 'Failed' : 'Running'
+    return {
+      id,
+      phase: 'tool',
+      status,
+      title: `${verb} ${command === undefined ? 'terminal command' : `\`${command}\``}`,
+      detail: command,
+      command,
+      toolName: toolName ?? 'terminal',
+    }
+  }
+  if (/tool|mcp|search|browser/i.test(type)) {
+    const name = toolName ?? type
+    return {
+      id,
+      phase: 'tool',
+      status,
+      title: `${status === 'completed' ? 'Used' : status === 'failed' ? 'Failed' : 'Using'} ${name}`,
+      toolName: name,
+    }
+  }
+  return undefined
+}
+
 /**
  * Child-process client for the Codex App Server (`codex app-server --stdio`),
  * speaking newline-delimited JSON-RPC. Mirrors CodexAppServerClient.swift.
@@ -53,6 +122,7 @@ export class CodexAppServerClient {
   private agentMessages = new Map<string, Map<string, AgentMessage>>()
   private agentMessageOrder = new Map<string, string[]>()
   private visibleTextObservers = new Map<string, (text: string) => void>()
+  private activityObservers = new Map<string, (activity: HarnessActivityEvent) => void>()
   private processFailure?: string
   private initializedResult?: Record<string, unknown>
   /** Deduplicates the first app-server launch when warm-up and a turn race. */
@@ -229,6 +299,7 @@ export class CodexAppServerClient {
     onThreadStarted?: (threadID: string) => void
     onTurnStarted?: (threadID: string, turnID: string) => void
     onVisibleText?: (text: string) => void
+    onActivity?: (activity: HarnessActivityEvent) => void
   }): Promise<CodexTurnResult> {
     return this.runReadOnlyTurn({
       task: params.task,
@@ -244,6 +315,7 @@ export class CodexAppServerClient {
       onThreadStarted: params.onThreadStarted,
       onTurnStarted: params.onTurnStarted,
       onVisibleText: params.onVisibleText,
+      onActivity: params.onActivity,
       reasoningEffort: params.reasoningEffort,
     })
   }
@@ -257,6 +329,7 @@ export class CodexAppServerClient {
     timeoutMs?: number
     onTurnStarted?: (threadID: string, turnID: string) => void
     onVisibleText?: (text: string) => void
+    onActivity?: (activity: HarnessActivityEvent) => void
   }): Promise<CodexTurnResult> {
     const normalizedThreadID = params.threadID.trim()
     if (normalizedThreadID === '') {
@@ -304,12 +377,14 @@ export class CodexAppServerClient {
       throw MuError.commandFailed('Codex turn/start returned no turn ID.')
     }
     this.setVisibleTextObserver(params.onVisibleText, turnID)
+    this.setActivityObserver(params.onActivity, turnID)
     try {
       params.onTurnStarted?.(normalizedThreadID, turnID)
       const completion = await this.waitForTurn(normalizedThreadID, turnID, params.timeoutMs ?? 600_000)
       return this.finishTurn(normalizedThreadID, turnID, completion, true)
     } finally {
       this.setVisibleTextObserver(undefined, turnID)
+      this.setActivityObserver(undefined, turnID)
     }
   }
 
@@ -344,6 +419,7 @@ export class CodexAppServerClient {
     onThreadStarted?: (threadID: string) => void
     onTurnStarted?: (threadID: string, turnID: string) => void
     onVisibleText?: (text: string) => void
+    onActivity?: (activity: HarnessActivityEvent) => void
     reasoningEffort?: string
   }): Promise<CodexTurnResult> {
     await this.start()
@@ -397,12 +473,14 @@ export class CodexAppServerClient {
       throw MuError.commandFailed('Codex turn/start returned no turn ID.')
     }
     this.setVisibleTextObserver(params.onVisibleText, turnID)
+    this.setActivityObserver(params.onActivity, turnID)
     try {
       params.onTurnStarted?.(threadID, turnID)
       const completion = await this.waitForTurn(threadID, turnID, params.timeoutMs)
       return this.finishTurn(threadID, turnID, completion, params.reconcileHistory)
     } finally {
       this.setVisibleTextObserver(undefined, turnID)
+      this.setActivityObserver(undefined, turnID)
     }
   }
 
@@ -593,6 +671,15 @@ export class CodexAppServerClient {
     if (typeof method !== 'string') return
     const params = asObject(message['params'])
 
+    if (method === 'item/started' || method === 'item/completed') {
+      const turnID = nonEmptyString(params['turnId'])
+      const item = asObject(params['item'])
+      if (turnID !== undefined) {
+        const activity = codexActivity(item, method === 'item/completed' ? 'completed' : 'started')
+        if (activity !== undefined) this.activityObservers.get(turnID)?.(activity)
+      }
+    }
+
     if (method === 'item/completed') {
       const turnID = nonEmptyString(params['turnId'])
       const item = asObject(params['item'])
@@ -602,8 +689,18 @@ export class CodexAppServerClient {
         if (itemID !== undefined && text !== undefined) {
           this.registerMessageItem(itemID, turnID)
           const map = new Map(this.agentMessages.get(turnID) ?? [])
-          map.set(itemID, { text, phase: nonEmptyString(item['phase']) })
+          const phase = nonEmptyString(item['phase'])
+          map.set(itemID, { text, phase })
           this.agentMessages.set(turnID, map)
+          if (phase === 'commentary') {
+            this.activityObservers.get(turnID)?.({
+              id: itemID,
+              phase: 'status',
+              status: 'completed',
+              title: 'Agent update',
+              detail: safeActivityText(text),
+            })
+          }
           const visible = this.preferredAgentMessage(turnID)
           if (visible !== '') this.visibleTextObservers.get(turnID)?.(visible)
         }
@@ -649,6 +746,17 @@ export class CodexAppServerClient {
       this.visibleTextObservers.delete(turnID)
     } else {
       this.visibleTextObservers.set(turnID, observer)
+    }
+  }
+
+  private setActivityObserver(
+    observer: ((activity: HarnessActivityEvent) => void) | undefined,
+    turnID: string,
+  ): void {
+    if (observer === undefined) {
+      this.activityObservers.delete(turnID)
+    } else {
+      this.activityObservers.set(turnID, observer)
     }
   }
 

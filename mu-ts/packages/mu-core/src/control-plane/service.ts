@@ -9,7 +9,7 @@ import {
   pcvString,
   stableConflictID,
 } from '../context-kernel/index.ts'
-import type { Harness, HarnessTurnEvent, HarnessTurnInput } from '../harness/types.ts'
+import type { Harness, HarnessActivityEvent, HarnessTurnEvent, HarnessTurnInput } from '../harness/types.ts'
 import { resolveReasoningEffort, type AgentRuntimeEndpointScope, type AgentRuntimeInstanceIdentity, type ReasoningEffort } from '../types.ts'
 import { toAgentHostAdapter } from '../host-adapter/harness-adapter.ts'
 import type { AgentHostAdapter, HostHistoryCandidate } from '../host-adapter/types.ts'
@@ -24,6 +24,8 @@ import {
   createRuntimeInteractionRequest,
   createRuntimeSessionBinding,
   createTaskRecord,
+  createRegistryTombstone,
+  duplicateDiscoveredRuntimeEndpointIDs,
   type AgentIdentity,
   type ChatEntry,
   type HandoffRecord,
@@ -39,7 +41,8 @@ import {
   fetchAgents,
   fetchChatEntries,
   fetchEndpoint,
-  fetchEndpoints,
+  fetchRegisteredEndpoint,
+  fetchRegisteredEndpoints,
   fetchHandoffs,
   fetchProjectApprovals,
   fetchProjects,
@@ -60,6 +63,7 @@ import {
   upsertProject,
   upsertProjectApproval,
   upsertProjectReview,
+  upsertRegistryTombstone,
   upsertRun,
   upsertRuntimeArtifact,
   upsertRuntimeInteraction,
@@ -169,8 +173,14 @@ export interface ControlPlaneService {
     location: RuntimeEndpoint['location']
     /** Explicit instance identity; defaults are derived from the runtime type. */
     instanceIdentity?: Partial<AgentRuntimeInstanceIdentity>
+    /** Optional user-supplied local configuration, kept opaque to the core. */
+    nativeConfiguration?: Readonly<Record<string, string>>
+    /** Discovery state override for hosts that still need an adapter. */
+    status?: RuntimeEndpoint['status']
   }): RuntimeEndpoint
   listEndpoints(): RuntimeEndpoint[]
+  removeEndpoint(endpointID: UUID): RuntimeEndpoint
+  removeDuplicateDiscoveredEndpoints(): UUID[]
   // Tasks
   createTask(params: {
     projectID: UUID
@@ -253,6 +263,29 @@ export interface ControlPlaneService {
 }
 
 type ContextConflictRecordLike = ReturnType<typeof createContextConflictRecord>
+
+function activityPayload(activity: HarnessActivityEvent): Readonly<Record<string, string>> {
+  const payload: Record<string, string> = {
+    phase: activity.phase,
+    status: activity.status,
+  }
+  if (activity.id !== undefined) payload.activity_id = activity.id
+  if (activity.detail !== undefined) payload.detail = safeActivitySummary(activity.detail)
+  if (activity.toolName !== undefined) payload.tool_name = safeActivitySummary(activity.toolName)
+  if (activity.path !== undefined) payload.path = safeActivitySummary(activity.path)
+  if (activity.command !== undefined) payload.command = safeActivitySummary(activity.command)
+  if (activity.requestID !== undefined) payload.request_id = activity.requestID
+  if (activity.artifactID !== undefined) payload.artifact_id = activity.artifactID
+  return payload
+}
+
+function safeActivitySummary(value: string): string {
+  const normalized = value
+    .replace(/(?:sk|key|token|secret)[-_][A-Za-z0-9._-]+/gi, '[redacted]')
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [redacted]')
+    .trim()
+  return normalized.length > 240 ? `${normalized.slice(0, 237)}…` : normalized
+}
 
 // ---------------------------------------------------------------------------
 // Service
@@ -436,9 +469,10 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
         provenance: 'vendor_cli',
         permissionModel: 'fine_grained',
         capabilities: new Set(['start', 'continue', 'cancel', 'stream_events']),
-        status: 'discovered',
+        status: params.status ?? 'discovered',
         guaranteeNote: 'Registered by the control plane.',
         lastProbedAt: now(),
+        nativeConfiguration: params.nativeConfiguration,
         instanceIdentity: defaultInstanceIdentity(params, endpointID),
       })
       upsertEndpoint(store, endpoint)
@@ -479,7 +513,51 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
     },
 
     listEndpoints() {
-      return fetchEndpoints(store)
+      return fetchRegisteredEndpoints(store)
+    },
+
+    removeEndpoint(endpointID) {
+      const endpoint = fetchRegisteredEndpoint(store, endpointID)
+      if (endpoint === undefined || !fetchRegisteredEndpoints(store).some((candidate) => candidate.id === endpointID)) {
+        throw MuError.recordNotFound(`Runtime endpoint ${endpointID} was not found.`)
+      }
+      const removedAt = now()
+      upsertRegistryTombstone(store, createRegistryTombstone({
+        id: endpoint.id,
+        entityKind: 'runtime_endpoint',
+        displayName: endpoint.displayName,
+        deletedAt: removedAt,
+      }))
+      appendLedger(store, {
+        type: 'endpoint.deleted',
+        summary: `Removed runtime "${endpoint.displayName}" from the registry; history is preserved.`,
+        occurredAt: removedAt,
+        payload: { endpointID: endpoint.id },
+      })
+      return endpoint
+    },
+
+    removeDuplicateDiscoveredEndpoints() {
+      const endpoints = fetchRegisteredEndpoints(store)
+      const duplicateIDs = duplicateDiscoveredRuntimeEndpointIDs(endpoints)
+      for (const endpointID of duplicateIDs) {
+        const endpoint = fetchEndpoint(store, endpointID)
+        if (endpoint === undefined) continue
+        const removedAt = now()
+        upsertRegistryTombstone(store, createRegistryTombstone({
+          id: endpoint.id,
+          entityKind: 'runtime_endpoint',
+          displayName: endpoint.displayName,
+          deletedAt: removedAt,
+        }))
+        appendLedger(store, {
+          type: 'endpoint.deleted',
+          summary: `Removed duplicate discovered runtime "${endpoint.displayName}".`,
+          occurredAt: removedAt,
+          payload: { endpointID: endpoint.id, reason: 'duplicate_discovery' },
+        })
+      }
+      return duplicateIDs
     },
 
     // -----------------------------------------------------------------------
@@ -564,11 +642,11 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
         : fetchAgent(store, task.assignedAgentIdentityID)
       const endpointID = params.endpointID
         ?? agent?.preferredEndpointID
-        ?? fetchEndpoints(store).find((e) => e.status === 'active' || e.status === 'discovered')?.id
+        ?? fetchRegisteredEndpoints(store).find((e) => e.status === 'active' || e.status === 'discovered')?.id
       if (endpointID === undefined) {
         throw MuError.capabilityMissing('No runtime endpoint is available for the task.')
       }
-      const endpoint = fetchEndpoint(store, endpointID)
+      const endpoint = fetchRegisteredEndpoint(store, endpointID)
       if (endpoint === undefined) {
         throw MuError.recordNotFound(`Endpoint ${endpointID} was not found.`)
       }
@@ -755,11 +833,50 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
               lastActivitySummary: 'Agent session started.',
               updatedAt: now(),
             })
+            appendLedger(store, {
+              type: 'runtime.activity',
+              summary: 'Agent session started.',
+              projectID,
+              workspaceID: task.workspaceID,
+              taskID: task.id,
+              runID: run.id,
+              actorID: task.requestedByActorID,
+              payload: {
+                phase: 'status',
+                status: 'started',
+                session_id: event.sessionID,
+                binding_id: binding.id,
+              },
+              occurredAt: now(),
+            })
             break
           case 'visible_text':
             // Visible-text events are deltas; keep accumulating for the
             // streamed chat. The terminal result below is authoritative.
             output += event.text
+            break
+          case 'activity':
+            upsertRuntimeSessionBinding(store, {
+              ...binding,
+              nativeSessionID: sessionID || binding.nativeSessionID,
+              state: event.activity.status === 'blocked' ? 'awaiting_approval' : 'working',
+              lastActivitySummary: safeActivitySummary(event.activity.title),
+              updatedAt: now(),
+            })
+            appendLedger(store, {
+              type: 'runtime.activity',
+              summary: safeActivitySummary(event.activity.title),
+              projectID,
+              workspaceID: task.workspaceID,
+              taskID: task.id,
+              runID: run.id,
+              actorID: task.requestedByActorID,
+              payload: {
+                ...activityPayload(event.activity),
+                binding_id: binding.id,
+              },
+              occurredAt: now(),
+            })
             break
           case 'pending_approval':
             for (const approval of event.approvals) {
@@ -770,8 +887,8 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
                 nativeSessionID: sessionID,
                 nativeRequestID: approval.requestID,
                 kind: 'approval',
-                title: `Approval: ${approval.command}`,
-                detail: approval.reason,
+                title: `Approval: ${safeActivitySummary(approval.command)}`,
+                detail: safeActivitySummary(approval.reason),
                 payload: { requestID: approval.requestID },
                 state: 'pending',
                 createdAt: now(),
@@ -796,12 +913,33 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
                 approvalID: projectApproval.id,
                 occurredAt: now(),
               })
+              appendLedger(store, {
+                type: 'runtime.activity',
+                summary: `Approval requested for ${safeActivitySummary(approval.command)}.`,
+                projectID,
+                workspaceID: task.workspaceID,
+                taskID: task.id,
+                runID: run.id,
+                approvalID: projectApproval.id,
+                actorID: task.requestedByActorID,
+                payload: {
+                  phase: 'authorization',
+                  status: 'blocked',
+                  command: safeActivitySummary(approval.command),
+                  detail: safeActivitySummary(approval.reason),
+                  request_id: approval.requestID,
+                  binding_id: binding.id,
+                },
+                occurredAt: now(),
+              })
             }
             break
           default:
             break
         }
-        terminalEvent = event
+        if (event.kind === 'completed' || event.kind === 'failed' || event.kind === 'cancelled') {
+          terminalEvent = event
+        }
         yield event
       }
 
@@ -828,6 +966,23 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
               observedAt: nowT,
             }),
           )
+          appendLedger(store, {
+            type: 'runtime.activity',
+            summary: `Artifact available: ${artifact.relativePath}.`,
+            projectID,
+            workspaceID: task.workspaceID,
+            taskID: task.id,
+            runID: run.id,
+            actorID: task.requestedByActorID,
+            payload: {
+              phase: 'artifact',
+              status: 'completed',
+              artifact_name: artifact.name,
+              path: artifact.relativePath,
+              binding_id: binding.id,
+            },
+            occurredAt: nowT,
+          })
         }
       }
 
@@ -933,7 +1088,7 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
       if (run.state === 'completed' || run.state === 'failed' || run.state === 'cancelled') {
         throw MuError.invalidTransition(`Run ${runID} is already terminal (${run.state}).`)
       }
-      const endpoint = fetchEndpoint(store, run.endpointID)
+      const endpoint = fetchRegisteredEndpoint(store, run.endpointID)
       if (endpoint === undefined) {
         throw MuError.recordNotFound(`Endpoint ${run.endpointID} was not found.`)
       }
@@ -1298,7 +1453,7 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
 
     async discoverHistory(endpointID, workspacePath) {
       if (host.discoverHistory === undefined) return []
-      const endpoint = fetchEndpoint(store, endpointID)
+      const endpoint = fetchRegisteredEndpoint(store, endpointID)
       if (endpoint === undefined) {
         throw MuError.recordNotFound(`Endpoint ${endpointID} was not found.`)
       }
@@ -1309,7 +1464,7 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
       if (host.hydrateHistory === undefined) {
         throw MuError.capabilityMissing('This host does not support history hydration.')
       }
-      const endpoint = fetchEndpoint(store, endpointID)
+      const endpoint = fetchRegisteredEndpoint(store, endpointID)
       if (endpoint === undefined) {
         throw MuError.recordNotFound(`Endpoint ${endpointID} was not found.`)
       }
@@ -1318,7 +1473,7 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
 
     async warmEndpoints() {
       if (host.warmEndpoint === undefined) return
-      const endpoints = fetchEndpoints(store).filter((endpoint) =>
+      const endpoints = fetchRegisteredEndpoints(store).filter((endpoint) =>
         endpoint.status === 'active' || endpoint.status === 'discovered'
       )
       await Promise.all(endpoints.map(async (endpoint) => {
@@ -1333,7 +1488,7 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
 
     async probeEndpoints() {
       const outcomes: ProbeOutcome[] = []
-      for (const endpoint of fetchEndpoints(store)) {
+      for (const endpoint of fetchRegisteredEndpoints(store)) {
         const result = await host.probe(endpointScope(endpoint))
         const probedAt = now()
         const updated: RuntimeEndpoint = {

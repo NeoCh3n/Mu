@@ -34,7 +34,8 @@ public enum WorkspaceChatRouter {
         text: String,
         assignedAgentIdentityID: UUID?,
         agents: [AgentIdentity],
-        endpoints: [RuntimeEndpoint]
+        endpoints: [RuntimeEndpoint],
+        selectedEndpointID: UUID? = nil
     ) throws -> WorkspaceChatRoute? {
         let expression = try NSRegularExpression(
             pattern: #"(?<![@\p{L}\p{N}_])@([\p{L}\p{N}][\p{L}\p{N}._-]*)"#,
@@ -42,9 +43,8 @@ public enum WorkspaceChatRouter {
         )
         let sourceRange = NSRange(text.startIndex..<text.endIndex, in: text)
         let matches = expression.matches(in: text, range: sourceRange)
-        guard !matches.isEmpty else { return nil }
-
         let endpointByID = Dictionary(uniqueKeysWithValues: endpoints.map { ($0.id, $0) })
+        let selectedEndpoint = selectedEndpointID.flatMap { endpointByID[$0] }
         var agentAliases: [String: [AgentIdentity]] = [:]
         for agent in agents {
             let names = aliases(for: agent.displayName).union(
@@ -80,7 +80,13 @@ public enum WorkspaceChatRouter {
                     default: []
                 ].append(endpoint)
             default:
-                break
+                let normalized = endpoint.runtimeTypeID.lowercased()
+                if normalized.contains("pi/") || normalized == "pi" {
+                    endpointAliases["pi", default: []].append(endpoint)
+                }
+                if normalized.contains("opencode") {
+                    endpointAliases["opencode", default: []].append(endpoint)
+                }
             }
         }
 
@@ -90,22 +96,62 @@ public enum WorkspaceChatRouter {
         }
         var resolvedTargets: [Target] = []
         var mentionNames: [String] = []
+
+        // The composer can select a concrete Runtime without exposing the
+        // endpoint ID or requiring an @mention. This is also the tie-breaker
+        // for a generic @Codex/@Claude alias when multiple instances exist.
+        if matches.isEmpty {
+            guard let selectedEndpoint else { return nil }
+            let preferred = agents
+                .filter { $0.preferredEndpointID == selectedEndpoint.id }
+                .sorted {
+                    $0.displayName.localizedCaseInsensitiveCompare($1.displayName)
+                        == .orderedAscending
+                }
+                .first
+            let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !prompt.isEmpty else { return nil }
+            return WorkspaceChatRoute(
+                mention: selectedEndpoint.displayName,
+                endpointID: selectedEndpoint.id,
+                agentIdentityID: preferred?.id,
+                prompt: prompt
+            )
+        }
+
         for match in matches {
             guard let tokenRange = Range(match.range(at: 1), in: text) else { continue }
             let rawToken = String(text[tokenRange])
             let token = normalize(rawToken)
-            let matchingAgents = Array(
+            var matchingAgents = Array(
                 Dictionary(
                     grouping: agentAliases[token] ?? [],
                     by: \.id
                 ).values.compactMap(\.first)
             )
-            let matchingEndpoints = Array(
+            var matchingEndpoints = Array(
                 Dictionary(
                     grouping: endpointAliases[token] ?? [],
                     by: \.id
                 ).values.compactMap(\.first)
             )
+
+            // A selected Runtime is an explicit user choice. If the token is
+            // a generic provider alias (for example @Codex), use that choice
+            // instead of surfacing an ambiguity error. An exact Agent alias
+            // can still win when its preferred Runtime is the selected one.
+            if let selectedEndpointID {
+                if let selectedMatch = matchingEndpoints.first(where: {
+                    $0.id == selectedEndpointID
+                }) {
+                    matchingEndpoints = [selectedMatch]
+                    matchingAgents = []
+                } else {
+                    matchingAgents = matchingAgents.filter {
+                        $0.preferredEndpointID == selectedEndpointID
+                    }
+                }
+            }
             guard matchingAgents.count + matchingEndpoints.count <= 1 else {
                 let candidates =
                     matchingAgents.map(\.displayName) + matchingEndpoints.map(\.displayName)

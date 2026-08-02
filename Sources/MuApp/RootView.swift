@@ -32,7 +32,7 @@ struct RootView: View {
                 .environmentObject(store)
         }
         .sheet(isPresented: $store.isRegisteringRuntime) {
-            RegisterRuntimeSheet()
+            RegisterRuntimeSheet(provider: store.runtimeSetupProvider)
                 .environmentObject(store)
         }
         .sheet(item: $store.checkpointForHandoff) { checkpoint in
@@ -72,29 +72,61 @@ struct RootView: View {
             Text(registryDeletionMessage)
         }
         .overlay(alignment: .bottomTrailing) {
-            if let message = store.transientMessage {
-                HStack(spacing: 10) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(MuPalette.mint)
-                    Text(message)
-                        .font(.subheadline.weight(.medium))
-                    Button {
-                        store.transientMessage = nil
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.caption)
+            VStack(alignment: .trailing, spacing: 10) {
+                if let message = store.transientMessage {
+                    HStack(spacing: 10) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(MuPalette.mint)
+                        Text(message)
+                            .font(.subheadline.weight(.medium))
+                        Button {
+                            store.transientMessage = nil
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 11)
+                    .background(.thickMaterial, in: Capsule())
+                    .shadow(color: .black.opacity(0.12), radius: 18, y: 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 11)
-                .background(.thickMaterial, in: Capsule())
-                .shadow(color: .black.opacity(0.12), radius: 18, y: 8)
-                .padding(22)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+
+                if let notice = store.completionToast {
+                    HStack(spacing: 10) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.title3)
+                            .foregroundStyle(MuPalette.mint)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(muText(store.interfaceLanguage, "Task completed", "任务已完成"))
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(.secondary)
+                            Text(notice.message)
+                                .font(.subheadline.weight(.medium))
+                                .lineLimit(2)
+                        }
+                        Button {
+                            store.dismissCompletionToast()
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(muText(store.interfaceLanguage, "Dismiss task completion notification", "关闭任务完成通知"))
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 11)
+                    .background(.thickMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .shadow(color: .black.opacity(0.12), radius: 18, y: 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
             }
+            .padding(22)
         }
         .animation(.snappy, value: store.transientMessage)
+        .animation(.snappy, value: store.completionToast)
     }
 
     private var registryDeletionMessage: String {
@@ -151,9 +183,9 @@ struct RootView: View {
                 .frame(width: 42, height: 42)
 
                 VStack(alignment: .leading, spacing: 2) {
-            Text("Mu")
+                    Text("Mu")
                         .font(.headline)
-                    Text("Runtime control plane")
+                        Text(muText(store.interfaceLanguage, "Runtime control plane", "运行时控制平面"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -163,7 +195,9 @@ struct RootView: View {
             .padding(.top, 18)
             .padding(.bottom, 14)
 
-            List(AppSection.allCases) { section in
+            // Settings is intentionally kept out of the primary navigation;
+            // the single Local control plane entry below is its home.
+            List(AppSection.allCases.filter { $0 != .settings }) { section in
                 let isSelected = store.section == section
                 Button {
                     store.section = section
@@ -171,7 +205,7 @@ struct RootView: View {
                     HStack(spacing: 10) {
                         Image(systemName: section.symbol)
                             .frame(width: 18)
-                        Text(section.title)
+                            Text(section.localizedTitle(for: store.interfaceLanguage))
                             .fontWeight(isSelected ? .semibold : .regular)
                         Spacer(minLength: 8)
                         if isSelected {
@@ -200,14 +234,14 @@ struct RootView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(section.title)
+                .accessibilityLabel(section.localizedTitle(for: store.interfaceLanguage))
                 .accessibilityValue(
                     sidebarAccessibilityValue(
                         isSelected: isSelected
                     )
                 )
                 .accessibilityAddTraits(isSelected ? .isSelected : [])
-                .help(section.title)
+                .help(section.localizedTitle(for: store.interfaceLanguage))
                 .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
                 .listRowSeparator(.hidden)
             }
@@ -215,17 +249,27 @@ struct RootView: View {
 
             VStack(alignment: .leading, spacing: 9) {
                 Divider()
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(MuPalette.mint)
-                        .frame(width: 7, height: 7)
-                    Text("Local control plane")
-                        .font(.caption.weight(.medium))
+                Button {
+                    store.section = .settings
+                } label: {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(MuPalette.mint)
+                            .frame(width: 7, height: 7)
+                        Text(muText(store.interfaceLanguage, "Local control plane", "本地控制平面"))
+                            .font(.caption.weight(.medium))
+                        Spacer()
+                        Image(systemName: "gearshape")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                Text("No hosted relay · SQLite + CAS")
+                .buttonStyle(.plain)
+                .help(muText(store.interfaceLanguage, "Configure local control plane", "配置本地控制平面"))
+                Text(muText(store.interfaceLanguage, "No hosted relay · SQLite + CAS", "无需托管中继 · SQLite + CAS"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                Text("State saves continuously")
+                Text(muText(store.interfaceLanguage, "State saves continuously", "状态会自动保存"))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -253,6 +297,8 @@ struct RootView: View {
             AgentsView()
         case .tasks:
             TasksWorkspaceView()
+        case .settings:
+            ControlPlaneSettingsView()
         }
     }
 }
@@ -287,14 +333,14 @@ struct DashboardView: View {
             VStack(alignment: .leading, spacing: 24) {
                 HStack(alignment: .bottom) {
                     SectionHeader(
-                        title: "Control plane",
-                        subtitle: "Projects organize portable Task state across runtime boundaries."
+                        title: muText(store.interfaceLanguage, "Control plane", "控制平面"),
+                        subtitle: muText(store.interfaceLanguage, "Projects organize portable Task state across runtime boundaries.", "Projects 将可移植的任务状态组织在不同运行时边界之上。")
                     )
                     Spacer()
                     Button {
                         store.openNewTask()
                     } label: {
-                        Label("New project", systemImage: "plus")
+                        Label(muText(store.interfaceLanguage, "New project", "新建 Project"), systemImage: "plus")
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(MuPalette.violet)
@@ -305,44 +351,44 @@ struct DashboardView: View {
                     spacing: 14
                 ) {
                     MetricCard(
-                        title: "Active Projects",
+                        title: muText(store.interfaceLanguage, "Active Projects", "活跃 Projects"),
                         value: "\(activeProjects.count)",
-                        detail: "\(activeTasks.count) active Tasks",
+                        detail: "\(activeTasks.count) \(muText(store.interfaceLanguage, "active Tasks", "个活跃任务"))",
                         color: MuPalette.violet,
                         symbol: "bolt.fill"
                     )
                     MetricCard(
-                        title: "Active Tasks",
+                        title: muText(store.interfaceLanguage, "Active Tasks", "活跃任务"),
                         value: "\(activeTasks.count)",
-                        detail: "Across current Projects",
+                        detail: muText(store.interfaceLanguage, "Across current Projects", "当前 Projects 中"),
                         color: MuPalette.coral,
                         symbol: "bubble.left.and.bubble.right"
                     )
                     MetricCard(
-                        title: "Agents in work",
+                        title: muText(store.interfaceLanguage, "Agents in work", "参与中的 Agents"),
                         value: "\(participatingAgents.count)",
-                        detail: "Assigned to active Tasks",
+                        detail: muText(store.interfaceLanguage, "Assigned to active Tasks", "已分配到活跃任务"),
                         color: MuPalette.mint,
                         symbol: "person.2.fill"
                     )
                     MetricCard(
-                        title: "Connected runtimes",
+                        title: muText(store.interfaceLanguage, "Connected runtimes", "已连接运行时"),
                         value: "\(store.endpoints.filter { $0.status == .active }.count)",
-                        detail: "Ready to receive work",
+                        detail: muText(store.interfaceLanguage, "Ready to receive work", "已准备接收工作"),
                         color: .blue,
                         symbol: "point.3.connected.trianglepath.dotted"
                     )
                 }
 
                 Panel(
-                    title: "Current Projects",
-                    subtitle: "What is in progress and which Agents are participating"
+                    title: muText(store.interfaceLanguage, "Current Projects", "当前 Projects"),
+                    subtitle: muText(store.interfaceLanguage, "What is in progress and which Agents are participating", "当前进展和参与的 Agents")
                 ) {
                     if projects.isEmpty {
                         compactEmpty(
                             symbol: "folder",
-                            title: "No Projects yet",
-                            message: "Create a Project to give Agents a shared workspace."
+                            title: muText(store.interfaceLanguage, "No Projects yet", "还没有 Projects"),
+                            message: muText(store.interfaceLanguage, "Create a Project to give Agents a shared workspace.", "创建 Project，为 Agents 提供共享工作区。")
                         )
                     } else {
                         VStack(spacing: 0) {
@@ -370,14 +416,14 @@ struct DashboardView: View {
 
                 HStack(alignment: .top, spacing: 16) {
                     Panel(
-                        title: "Active work",
-                        subtitle: "Tasks, ownership, and runtime state"
+                        title: muText(store.interfaceLanguage, "Active work", "当前工作"),
+                        subtitle: muText(store.interfaceLanguage, "Tasks, ownership, and runtime state", "任务、负责人和运行时状态")
                     ) {
                         if activeTasks.isEmpty {
                             compactEmpty(
                                 symbol: "checklist",
-                                title: "No active Tasks",
-                                message: "Create a Task inside a Project to begin a portable execution record."
+                                title: muText(store.interfaceLanguage, "No active Tasks", "没有活跃任务"),
+                                message: muText(store.interfaceLanguage, "Create a Task inside a Project to begin a portable execution record.", "在 Project 中创建任务，开始一条可移植的执行记录。")
                             )
                         } else {
                             VStack(spacing: 0) {
@@ -399,14 +445,14 @@ struct DashboardView: View {
                     .frame(maxWidth: .infinity)
 
                     Panel(
-                        title: "Agents in the room",
-                        subtitle: "Identities currently attached to active work"
+                        title: muText(store.interfaceLanguage, "Agents in the room", "当前参与的 Agents"),
+                        subtitle: muText(store.interfaceLanguage, "Identities currently attached to active work", "当前活跃工作中的身份")
                     ) {
                         if participatingAgents.isEmpty {
                             compactEmpty(
                                 symbol: "person.2",
-                                title: "No active Agent assignments",
-                                message: "Agents will appear here when a Project Task starts."
+                                title: muText(store.interfaceLanguage, "No active Agent assignments", "没有活跃的 Agent 分配"),
+                                message: muText(store.interfaceLanguage, "Agents will appear here when a Project Task starts.", "Project 任务开始后，Agent 会显示在这里。")
                             )
                         } else {
                             VStack(spacing: 0) {
@@ -433,17 +479,16 @@ struct DashboardView: View {
                             .frame(width: 44, height: 44)
                             .background(MuPalette.violet.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Honest integration boundary")
+                            Text(muText(store.interfaceLanguage, "Honest integration boundary", "真实集成边界"))
                                 .font(.headline)
                             Text(
-                                "The bundled endpoints are offline conformance fixtures. "
-                                + "Mu will not label a vendor runtime as controlled until an adapter probe proves it."
+                                muText(store.interfaceLanguage, "The bundled endpoints are offline conformance fixtures. Mu will not label a vendor runtime as controlled until an adapter probe proves it.", "内置 endpoint 是离线一致性测试 fixture。只有适配器检查通过后，Mu 才会将 vendor runtime 标记为可控。")
                             )
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button("Manage agents & runtimes") {
+                        Button(muText(store.interfaceLanguage, "Manage agents & runtimes", "管理 Agents 和运行时")) {
                             store.section = .agents
                         }
                     }
@@ -456,7 +501,7 @@ struct DashboardView: View {
                 Button {
                     store.reload()
                 } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
+                    Label(muText(store.interfaceLanguage, "Refresh", "刷新"), systemImage: "arrow.clockwise")
                 }
             }
         }

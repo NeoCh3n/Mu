@@ -77,7 +77,7 @@ const claudeCode = createBuiltinRuntimeGatewayAdapter({
     conditionalOperation('input.submit', 'Requires an active exact-workspace CLI session.'),
     conditionalOperation(
       'events.observe',
-      'Visible stream-json text is mirrored; thinking and tool internals are excluded.',
+      'Visible stream-json text plus safe tool/file receipts are mirrored; private reasoning text is excluded.',
     ),
     conditionalOperation('interrupt', 'Available while the Mu-launched CLI process is active.'),
     conditionalOperation('resume', 'Requires a persisted Claude Code session ID.'),

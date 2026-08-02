@@ -14,26 +14,30 @@ struct MuApp: App {
         .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("New Project") {
+                Button(muText(store.interfaceLanguage, "New Project", "新建 Project")) {
                     store.openNewTask()
                 }
                 .keyboardShortcut("n", modifiers: .command)
             }
-            CommandMenu("Control Plane") {
-                Button("Overview") {
+            CommandMenu(muText(store.interfaceLanguage, "Control Plane", "控制平面")) {
+                Button(muText(store.interfaceLanguage, "Overview", "概览")) {
                     store.section = .overview
                 }
                 .keyboardShortcut("1", modifiers: .command)
-                Button("Agents") {
+                Button(muText(store.interfaceLanguage, "Agents", "Agents")) {
                     store.section = .agents
                 }
                 .keyboardShortcut("2", modifiers: .command)
-                Button("Projects") {
+                Button(muText(store.interfaceLanguage, "Projects", "Projects")) {
                     store.section = .tasks
                 }
                 .keyboardShortcut("3", modifiers: .command)
+                Button(muText(store.interfaceLanguage, "Settings", "设置")) {
+                    store.section = .settings
+                }
+                .keyboardShortcut(",", modifiers: .command)
                 Divider()
-                Button("Refresh") {
+                Button(muText(store.interfaceLanguage, "Refresh", "刷新")) {
                     store.reload()
                 }
                 .keyboardShortcut("r", modifiers: .command)

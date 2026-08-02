@@ -182,6 +182,7 @@ extension ControlPlaneService {
                 runtimeName: "Claude Code"
             )
         }
+        let activityTaskID = task.id
 
         do {
             try recordContextDelivery(
@@ -212,6 +213,17 @@ extension ControlPlaneService {
                 },
                 onVisibleText: { text in
                     mirror.offer(text)
+                },
+                onActivity: { [weak self] activity in
+                    guard let self else { return }
+                    try? self.persistRuntimeActivity(
+                        activity,
+                        taskID: activityTaskID,
+                        runID: persistentRunID,
+                        projectID: kernel.project.id,
+                        workspaceID: kernel.workspace.id,
+                        bindingID: persistentBindingID
+                    )
                 }
             )
             try recordContextDelivery(

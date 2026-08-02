@@ -23,6 +23,8 @@ public final class CodexAppServerClient {
     private var agentMessageOrder: [String: [String]] = [:]
     private var visibleTextObservers:
         [String: @Sendable (String) -> Void] = [:]
+    private var activityObservers:
+        [String: @Sendable (RuntimeActivityEvent) -> Void] = [:]
     private var processFailure: String?
     private var initializedResult: [String: Any]?
 
@@ -333,7 +335,9 @@ public final class CodexAppServerClient {
         onThreadStarted: (String) throws -> Void = { _ in },
         onTurnStarted: (String, String) throws -> Void = { _, _ in },
         onVisibleText:
-            @escaping @Sendable (String) -> Void = { _ in }
+            @escaping @Sendable (String) -> Void = { _ in },
+        onActivity:
+            @escaping @Sendable (RuntimeActivityEvent) -> Void = { _ in }
     ) throws -> CodexTurnResult {
         try runReadOnlyTurn(
             task: task,
@@ -348,7 +352,8 @@ public final class CodexAppServerClient {
             timeout: timeout,
             onThreadStarted: onThreadStarted,
             onTurnStarted: onTurnStarted,
-            onVisibleText: onVisibleText
+            onVisibleText: onVisibleText,
+            onActivity: onActivity
         )
     }
 
@@ -364,7 +369,9 @@ public final class CodexAppServerClient {
         onTurnStarted:
             (String, String) throws -> Void = { _, _ in },
         onVisibleText:
-            @escaping @Sendable (String) -> Void = { _ in }
+            @escaping @Sendable (String) -> Void = { _ in },
+        onActivity:
+            @escaping @Sendable (RuntimeActivityEvent) -> Void = { _ in }
     ) throws -> CodexTurnResult {
         let normalizedThreadID = threadID.trimmingCharacters(
             in: .whitespacesAndNewlines
@@ -440,8 +447,10 @@ public final class CodexAppServerClient {
             onVisibleText,
             for: turnID
         )
+        setActivityObserver(onActivity, for: turnID)
         defer {
             setVisibleTextObserver(nil, for: turnID)
+            setActivityObserver(nil, for: turnID)
         }
         try onTurnStarted(normalizedThreadID, turnID)
         let completion = try waitForTurn(
@@ -512,7 +521,9 @@ public final class CodexAppServerClient {
         onThreadStarted: (String) throws -> Void = { _ in },
         onTurnStarted: (String, String) throws -> Void = { _, _ in },
         onVisibleText:
-            @escaping @Sendable (String) -> Void = { _ in }
+            @escaping @Sendable (String) -> Void = { _ in },
+        onActivity:
+            @escaping @Sendable (RuntimeActivityEvent) -> Void = { _ in }
     ) throws -> CodexTurnResult {
         _ = try start()
         let threadResponse = try request(
@@ -577,8 +588,10 @@ public final class CodexAppServerClient {
             onVisibleText,
             for: turnID
         )
+        setActivityObserver(onActivity, for: turnID)
         defer {
             setVisibleTextObserver(nil, for: turnID)
+            setActivityObserver(nil, for: turnID)
         }
         try onTurnStarted(threadID, turnID)
 
@@ -719,6 +732,18 @@ public final class CodexAppServerClient {
               let params = message["params"] as? [String: Any] else {
             return
         }
+        if method == "item/started" || method == "item/completed",
+           let turnID = params["turnId"] as? String,
+           let item = params["item"] as? [String: Any],
+           let activity = Self.runtimeActivity(
+               from: item,
+               status: method == "item/completed" ? "completed" : "started"
+           ) {
+            condition.lock()
+            let callback = activityObservers[turnID]
+            condition.unlock()
+            callback?(activity)
+        }
         if method == "item/completed",
            let turnID = params["turnId"] as? String,
            let item = params["item"] as? [String: Any],
@@ -726,6 +751,7 @@ public final class CodexAppServerClient {
            let itemID = item["id"] as? String,
            let text = item["text"] as? String {
             let callback: (@Sendable (String) -> Void)?
+            let activityCallback: (@Sendable (RuntimeActivityEvent) -> Void)?
             let visibleText: String
             condition.lock()
             registerMessageItem(itemID, for: turnID)
@@ -734,6 +760,9 @@ public final class CodexAppServerClient {
                 phase: item["phase"] as? String
             )
             callback = visibleTextObservers[turnID]
+            activityCallback = (item["phase"] as? String) == "commentary"
+                ? activityObservers[turnID]
+                : nil
             visibleText = Self.preferredAgentMessage(
                 (agentMessageOrder[turnID] ?? []).compactMap {
                     agentMessages[turnID]?[$0]
@@ -743,6 +772,15 @@ public final class CodexAppServerClient {
             condition.unlock()
             if !visibleText.isEmpty {
                 callback?(visibleText)
+            }
+            if (item["phase"] as? String) == "commentary" {
+                activityCallback?(RuntimeActivityEvent(
+                    id: itemID,
+                    phase: "status",
+                    status: "completed",
+                    title: "Agent update",
+                    detail: Self.safeActivityText(text)
+                ))
             }
         } else if method == "item/agentMessage/delta",
                   let turnID = params["turnId"] as? String,
@@ -795,6 +833,15 @@ public final class CodexAppServerClient {
     ) {
         condition.lock()
         visibleTextObservers[turnID] = observer
+        condition.unlock()
+    }
+
+    private func setActivityObserver(
+        _ observer: (@Sendable (RuntimeActivityEvent) -> Void)?,
+        for turnID: String
+    ) {
+        condition.lock()
+        activityObservers[turnID] = observer
         condition.unlock()
     }
 
@@ -930,6 +977,100 @@ public final class CodexAppServerClient {
             return error
         }
         return nil
+    }
+
+    private static func runtimeActivity(
+        from item: [String: Any],
+        status: String
+    ) -> RuntimeActivityEvent? {
+        let type = nonEmptyString(item["type"]) ?? ""
+        let id = nonEmptyString(item["id"])
+        let path = nonEmptyString(
+            item["filePath"] ?? item["file_path"] ?? item["path"]
+        )
+        let command = nonEmptyString(item["command"] ?? item["cmd"])
+        let tool = nonEmptyString(
+            item["name"] ?? item["toolName"] ?? item["tool_name"]
+        )
+        if type.localizedCaseInsensitiveContains("reasoning") {
+            return RuntimeActivityEvent(
+                id: id,
+                phase: "thinking",
+                status: status,
+                title: "Agent reasoning",
+                detail: "Codex reported a reasoning phase; private reasoning text is not copied into Mu."
+            )
+        }
+        if type.localizedCaseInsensitiveContains("plan") {
+            return RuntimeActivityEvent(
+                id: id,
+                phase: "status",
+                status: status,
+                title: "Plan updated"
+            )
+        }
+        if type.localizedCaseInsensitiveContains("file")
+            || type.localizedCaseInsensitiveContains("patch")
+            || path != nil {
+            let verb = status == "completed" ? "Read" : status == "failed" ? "Failed" : "Reading"
+            return RuntimeActivityEvent(
+                id: id,
+                phase: "file",
+                status: status,
+                title: verb + " " + (path ?? "workspace files"),
+                detail: tool.map { "Tool: \($0)" },
+                toolName: tool,
+                path: path
+            )
+        }
+        if type.localizedCaseInsensitiveContains("command")
+            || type.localizedCaseInsensitiveContains("terminal")
+            || type.localizedCaseInsensitiveContains("shell")
+            || type.localizedCaseInsensitiveContains("exec")
+            || command != nil {
+            let verb = status == "completed" ? "Ran" : status == "failed" ? "Failed" : "Running"
+            let target = command.map { "`\($0)`" } ?? "terminal command"
+            return RuntimeActivityEvent(
+                id: id,
+                phase: "tool",
+                status: status,
+                title: verb + " " + target,
+                detail: command,
+                toolName: tool ?? "terminal",
+                command: command
+            )
+        }
+        if type.localizedCaseInsensitiveContains("tool")
+            || type.localizedCaseInsensitiveContains("mcp")
+            || type.localizedCaseInsensitiveContains("search")
+            || type.localizedCaseInsensitiveContains("browser") {
+            let name = tool ?? type
+            return RuntimeActivityEvent(
+                id: id,
+                phase: "tool",
+                status: status,
+                title: (status == "completed" ? "Used" : status == "failed" ? "Failed" : "Using") + " " + name,
+                toolName: name
+            )
+        }
+        return nil
+    }
+
+    private static func safeActivityText(_ value: String) -> String {
+        let redacted = value
+            .replacingOccurrences(
+                of: #"(?i)(sk|key|token|secret)[-_][A-Za-z0-9._-]+"#,
+                with: "[redacted]",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"(?i)Bearer\s+[A-Za-z0-9._-]+"#,
+                with: "Bearer [redacted]",
+                options: .regularExpression
+            )
+        return redacted.count > 240
+            ? String(redacted.prefix(237)) + "…"
+            : redacted
     }
 
     private func agentMessage(for turnID: String) -> String {

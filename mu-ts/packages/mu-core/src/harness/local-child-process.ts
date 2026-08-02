@@ -27,6 +27,7 @@ import {
 import type {
   Harness,
   HarnessArtifactRecord,
+  HarnessActivityEvent,
   HarnessCapabilities,
   HarnessProbeResult,
   HarnessTurnEvent,
@@ -50,6 +51,7 @@ export interface ClaudeCodeClientLike {
     reasoningEffort?: string
     onSessionStarted?: (sessionID: string) => void
     onVisibleText?: (text: string) => void
+    onActivity?: (activity: HarnessActivityEvent) => void
   }): Promise<ClaudeCodeTurnResult>
   interrupt(): void
 }
@@ -74,6 +76,7 @@ export interface CodexClientLike {
     onThreadStarted?: (threadID: string) => void
     onTurnStarted?: (threadID: string, turnID: string) => void
     onVisibleText?: (text: string) => void
+    onActivity?: (activity: HarnessActivityEvent) => void
   }): Promise<CodexTurnResult>
   runReadOnlyContinuation(params: {
     threadID: string
@@ -84,6 +87,7 @@ export interface CodexClientLike {
     timeoutMs?: number
     onTurnStarted?: (threadID: string, turnID: string) => void
     onVisibleText?: (text: string) => void
+    onActivity?: (activity: HarnessActivityEvent) => void
   }): Promise<CodexTurnResult>
   interrupt(threadID: string, turnID: string): Promise<void>
   stop(): void
@@ -513,6 +517,7 @@ export class LocalChildProcessHarness implements Harness {
               }
               lastVisible = text
             },
+            onActivity: (activity) => queue.push({ kind: 'activity', activity }),
           })
           .then(mapClaudeResult)
       } catch (error) {
@@ -571,6 +576,7 @@ export class LocalChildProcessHarness implements Harness {
           queue.push({ kind: 'session_started', sessionID: threadID })
         },
         onVisibleText: (text) => queue.push({ kind: 'visible_text', text }),
+        onActivity: (activity) => queue.push({ kind: 'activity', activity }),
       })
     } else {
       pending = client.runReadOnlyTask({
@@ -584,6 +590,7 @@ export class LocalChildProcessHarness implements Harness {
           this.activeCodex.set(endpointKey, { threadID, turnID })
         },
         onVisibleText: (text) => queue.push({ kind: 'visible_text', text }),
+        onActivity: (activity) => queue.push({ kind: 'activity', activity }),
       })
     }
 

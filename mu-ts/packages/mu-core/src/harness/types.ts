@@ -63,6 +63,42 @@ export interface HarnessPendingApproval {
   readonly blocksInput?: boolean
 }
 
+/**
+ * A provider-neutral, user-visible runtime activity. This is deliberately
+ * narrower than a provider's wire protocol: hosts may expose a tool/file
+ * receipt or an authorization gate, but Mu never treats hidden chain of
+ * thought as an activity payload.
+ */
+export type HarnessActivityPhase =
+  | 'thinking'
+  | 'tool'
+  | 'file'
+  | 'authorization'
+  | 'artifact'
+  | 'status'
+
+export type HarnessActivityStatus =
+  | 'started'
+  | 'updated'
+  | 'completed'
+  | 'blocked'
+  | 'failed'
+
+export interface HarnessActivityEvent {
+  readonly id?: string
+  readonly phase: HarnessActivityPhase
+  readonly status: HarnessActivityStatus
+  /** Short, safe title suitable for a timeline row. */
+  readonly title: string
+  /** Optional provider-supplied receipt; never private reasoning text. */
+  readonly detail?: string
+  readonly toolName?: string
+  readonly path?: string
+  readonly command?: string
+  readonly requestID?: string
+  readonly artifactID?: string
+}
+
 export type HarnessTurnStatus = 'success' | 'failed' | 'cancelled' | 'pending_approval' | 'queued'
 
 export interface HarnessTurnResult {
@@ -81,6 +117,7 @@ export interface HarnessTurnResult {
 export type HarnessTurnEvent =
   | { readonly kind: 'session_started'; readonly sessionID: string }
   | { readonly kind: 'visible_text'; readonly text: string }
+  | { readonly kind: 'activity'; readonly activity: HarnessActivityEvent }
   | { readonly kind: 'pending_approval'; readonly approvals: readonly HarnessPendingApproval[] }
   | { readonly kind: 'completed'; readonly result: HarnessTurnResult }
   /** Harness-level failure with no result (unavailable executable, network, auth). */

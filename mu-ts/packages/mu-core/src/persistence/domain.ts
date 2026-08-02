@@ -76,9 +76,22 @@ export function fetchEndpoints(store: SQLiteStore): RuntimeEndpoint[] {
   return store.fetchRecords<RuntimeEndpoint>('endpoint').map(restoreEndpointSets)
 }
 
+export function fetchRegisteredEndpoints(store: SQLiteStore): RuntimeEndpoint[] {
+  const removedIDs = new Set(
+    fetchRegistryTombstones(store)
+      .filter((tombstone) => tombstone.entityKind === 'runtime_endpoint')
+      .map((tombstone) => tombstone.id),
+  )
+  return fetchEndpoints(store).filter((endpoint) => !removedIDs.has(endpoint.id))
+}
+
 export function fetchEndpoint(store: SQLiteStore, id: UUID): RuntimeEndpoint | undefined {
   const endpoint = store.fetchRecord<RuntimeEndpoint>('endpoint', id)
   return endpoint === undefined ? undefined : restoreEndpointSets(endpoint)
+}
+
+export function fetchRegisteredEndpoint(store: SQLiteStore, id: UUID): RuntimeEndpoint | undefined {
+  return fetchRegisteredEndpoints(store).find((endpoint) => endpoint.id === id)
 }
 
 /** Swift encodes Set fields as JSON arrays; restore them on decode. */
@@ -97,6 +110,10 @@ export function upsertEndpoint(store: SQLiteStore, endpoint: RuntimeEndpoint): v
     sortAt: endpoint.lastProbedAt,
     value: endpoint,
   })
+}
+
+export function deleteEndpoint(store: SQLiteStore, id: UUID): void {
+  store.deleteRecord('endpoint', id)
 }
 
 export function fetchAgents(store: SQLiteStore): AgentIdentity[] {

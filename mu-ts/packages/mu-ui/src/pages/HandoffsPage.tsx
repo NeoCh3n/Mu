@@ -1,8 +1,11 @@
 import { api } from '../api.ts'
-import { useQuery } from '../hooks.ts'
+import { useMuUISettings, useQuery } from '../hooks.ts'
+import { statusText, text } from '../i18n.ts'
 import { Empty, ErrorBanner, Page } from './ProjectsPage.tsx'
 
 export function HandoffsPage() {
+  const { settings } = useMuUISettings()
+  const t = (english: string, simplifiedChinese: string) => text(settings.language, english, simplifiedChinese)
   const { data, error, reload } = useQuery(() => api.listHandoffs())
 
   async function resolve(handoffID: string, accepted: boolean): Promise<void> {
@@ -19,7 +22,7 @@ export function HandoffsPage() {
   }
 
   return (
-    <Page title="Handoffs">
+    <Page title={t('Handoffs', '交接')}>
       {error !== undefined && <ErrorBanner message={error} />}
       <div className="space-y-2">
         {data?.handoffs.map((handoff) => (
@@ -30,20 +33,20 @@ export function HandoffsPage() {
                 task {handoff.taskID.slice(0, 8)} · {handoff.sourceEndpointID.slice(0, 8)} → {handoff.receiverEndpointID.slice(0, 8)}
               </div>
             </div>
-            <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-300">{handoff.status}</span>
+            <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-300">{statusText(settings.language, handoff.status)}</span>
             {handoff.status === 'proposed' && (
               <div className="flex gap-1">
                 <button onClick={() => void resolve(handoff.id, true)} className="rounded bg-green-900/60 px-2 py-1 text-xs text-green-200 hover:bg-green-900">
-                  Accept
+                  {t('Accept', '接受')}
                 </button>
                 <button onClick={() => void resolve(handoff.id, false)} className="rounded bg-red-900/60 px-2 py-1 text-xs text-red-200 hover:bg-red-900">
-                  Reject
+                  {t('Reject', '拒绝')}
                 </button>
               </div>
             )}
           </div>
         ))}
-        {data?.handoffs.length === 0 && <Empty message="No handoffs yet." />}
+        {data?.handoffs.length === 0 && <Empty message={t('No handoffs yet.', '还没有交接记录。')} />}
       </div>
     </Page>
   )

@@ -16,6 +16,8 @@ import { fetchLedger } from '../src/control-plane/ledger.ts'
 import { MuError } from '../src/errors.ts'
 import type { Harness, HarnessTurnEvent } from '../src/harness/types.ts'
 import { uuid, type UUID } from '../src/identity.ts'
+import { createRuntimeEndpoint } from '../src/models.ts'
+import { upsertEndpoint } from '../src/persistence/domain.ts'
 import { SQLiteStore } from '../src/persistence/store.ts'
 
 // ---------------------------------------------------------------------------
@@ -527,6 +529,66 @@ describe('ControlPlaneService', () => {
       expect(outcomes[0]?.ok).toBe(true)
       expect(service.listEndpoints()[0]?.status).toBe('active')
       expect(fetchLedger(store).some((e) => e.type === 'endpoint.probed')).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('removes a runtime from scheduling while preserving its historical snapshot', () => {
+    const { service, cleanup } = makeService()
+    try {
+      const endpoint = service.registerEndpoint({
+        runtimeTypeID: 'anthropic.claude-code/cli',
+        displayName: 'Claude Code (removable)',
+        runtimeVersion: 'test',
+        location: 'local',
+      })
+
+      const removed = service.removeEndpoint(endpoint.id)
+      expect(removed.id).toBe(endpoint.id)
+      expect(service.listEndpoints()).toEqual([])
+      expect(() => service.removeEndpoint(endpoint.id)).toThrow(MuError)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('closes only redundant low-confidence discoveries and keeps the newest copy', () => {
+    const { service, store, cleanup } = makeService()
+    try {
+      const older = createRuntimeEndpoint({
+        id: uuid(),
+        runtimeTypeID: 'local.unknown',
+        displayName: 'Unverified Runtime',
+        adapterVersion: '1.0.0',
+        runtimeVersion: 'unknown',
+        location: 'local',
+        provenance: 'vendor_cli',
+        permissionModel: 'fine_grained',
+        status: 'discovered',
+        guaranteeNote: 'discovered',
+        lastProbedAt: new Date('2026-08-01T00:00:00.000Z'),
+      })
+      const newest = createRuntimeEndpoint({
+        ...older,
+        id: uuid(),
+        lastProbedAt: new Date('2026-08-02T00:00:00.000Z'),
+      })
+      const distinct = createRuntimeEndpoint({
+        ...older,
+        id: uuid(),
+        displayName: 'Another Runtime',
+      })
+      upsertEndpoint(store, older)
+      upsertEndpoint(store, newest)
+      upsertEndpoint(store, distinct)
+
+      const removedIDs = service.removeDuplicateDiscoveredEndpoints()
+      expect(removedIDs).toEqual([older.id])
+      expect(service.listEndpoints().map((endpoint) => endpoint.id)).toEqual(
+        expect.arrayContaining([newest.id, distinct.id]),
+      )
+      expect(fetchLedger(store).at(-1)?.payload.reason).toBe('duplicate_discovery')
     } finally {
       cleanup()
     }

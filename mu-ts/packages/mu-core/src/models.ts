@@ -513,6 +513,51 @@ export function createRuntimeEndpoint(params: {
   }
 }
 
+/**
+ * Stable grouping key used by the UI and cleanup route. A discovered record
+ * is the same local instance when it reports the same identity or executable;
+ * otherwise the fallback is deliberately conservative and only groups exact
+ * runtime-type/display-name copies.
+ */
+export function runtimeEndpointIdentityKey(endpoint: RuntimeEndpoint): string {
+  const identity = endpoint.instanceIdentity
+  if (identity?.stableInstanceKey !== undefined) {
+    return `identity:${identity.provider.rawValue}:${identity.stableInstanceKey}`
+  }
+  const executable = endpoint.nativeConfiguration?.['executable']
+  if (executable !== undefined) {
+    return `executable:${endpoint.runtimeTypeID}:${executable}`
+  }
+  return `unidentified:${endpoint.runtimeTypeID}:${endpoint.displayName.trim().toLowerCase()}`
+}
+
+/** A runtime is useful once it is verified or has enough local identity to configure. */
+export function isUsefulRuntimeEndpoint(endpoint: RuntimeEndpoint): boolean {
+  return endpoint.status !== 'discovered'
+    || endpoint.instanceIdentity !== undefined
+    || endpoint.nativeConfiguration !== undefined
+}
+
+/**
+ * Returns only the redundant low-confidence discoveries. One newest record per
+ * conservative identity group is retained, so cleanup cannot remove distinct
+ * terminals or desktop instances.
+ */
+export function duplicateDiscoveredRuntimeEndpointIDs(
+  endpoints: readonly RuntimeEndpoint[],
+): UUID[] {
+  const groups = new Map<string, RuntimeEndpoint[]>()
+  for (const endpoint of endpoints) {
+    if (endpoint.status !== 'discovered' || isUsefulRuntimeEndpoint(endpoint)) continue
+    const key = runtimeEndpointIdentityKey(endpoint)
+    groups.set(key, [...(groups.get(key) ?? []), endpoint])
+  }
+  return [...groups.values()].flatMap((items) => items
+    .sort((left, right) => right.lastProbedAt.getTime() - left.lastProbedAt.getTime())
+    .slice(1)
+    .map((endpoint) => endpoint.id))
+}
+
 // ---------------------------------------------------------------------------
 // Vendor result types
 // ---------------------------------------------------------------------------

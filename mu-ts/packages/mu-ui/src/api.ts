@@ -167,6 +167,7 @@ export interface LedgerEvent {
   readonly taskID?: string
   readonly runID?: string
   readonly occurredAt: string
+  readonly payload?: Readonly<Record<string, string>>
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -194,7 +195,11 @@ export const api = {
   createAgent: (params: { displayName: string; shortName: string; role: string; summary: string; preferredEndpointID?: string }) =>
     request<{ agent: Agent }>('/agents', { method: 'POST', body: JSON.stringify(params) }),
   listEndpoints: () => request<{ endpoints: Endpoint[] }>('/endpoints'),
-  createEndpoint: (params: { runtimeTypeID: string; displayName: string; runtimeVersion: string; location: string }) =>
+  removeEndpoint: (endpointID: string) =>
+    request<{ endpoint: Endpoint }>(`/endpoints/${endpointID}`, { method: 'DELETE' }),
+  removeDuplicateDiscoveredEndpoints: () =>
+    request<{ removedEndpointIDs: string[] }>('/endpoints/cleanup-duplicates', { method: 'POST' }),
+  createEndpoint: (params: { runtimeTypeID: string; displayName: string; runtimeVersion: string; location: string; executablePath?: string; surfaceKind?: string; instanceLabel?: string }) =>
     request<{ endpoint: Endpoint }>('/endpoints', { method: 'POST', body: JSON.stringify(params) }),
   probeEndpoints: () => request<{ outcomes: Array<{ endpointID: string; ok: boolean; message: string }> }>(
     '/endpoints/probe',

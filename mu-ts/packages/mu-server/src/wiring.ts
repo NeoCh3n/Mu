@@ -119,8 +119,9 @@ export function buildApp(config: MuAppConfig): MuApp {
     harness = config.harness
   } else {
     // Local mode: bootstrap owns the single SQLite connection and seeds the
-    // same store that the server service will use. Opening a second store here
-    // would leave a live connection behind and weaken the single-writer rule.
+    // same store that the server service will use. It discovers runtimes but
+    // leaves Agent identities optional. Opening a second store here would
+    // leave a live connection behind and weaken the single-writer rule.
     const bootstrapped = bootstrapLocalControlPlane({
       dataDirectory: config.dataDirectory,
       filename: config.filename,
