@@ -41,23 +41,44 @@ Mu 不是另一个 Agent Wrapper，也不是多模型聊天界面。
 
 ## 架构
 
-```text
-人类与 Agent 参与者
-          │
-    Mu Project Control Plane
-          │
-任务 · 上下文 · 权限
-产物 · 审查 · 事件
-          │
-     Runtime Adapters
-          │
-Codex · Claude Code · CodeBuddy
-OpenWorker · External Agents
-          │
-        MCP Tools
+```mermaid
+flowchart TB
+    participants["人类与 Agent 参与者"]
+    control["Mu Project Control Plane"]
+    state["任务 · 上下文 · 权限<br/>产物 · 审查 · 事件"]
+    adapters["Runtime Adapters"]
+    runtimes["Codex · Claude Code · CodeBuddy<br/>OpenWorker · External Agents"]
+    tools["MCP Tools"]
+
+    participants --> control
+    control --> state
+    state --> adapters
+    adapters --> runtimes
+    runtimes --> tools
+    tools --> control
 ```
 
 Mu 希望让人类与 Agent 的协作，像现代软件开发一样结构化、可检查、可追溯、可迁移。
+
+## 协作流程
+
+```mermaid
+flowchart LR
+    project["创建或进入 Project"]
+    identity["确认参与者身份<br/>人类 / Agent / 外部组织"]
+    scope["定义任务范围<br/>权限边界 · 工作区 · 成功条件"]
+    context["生成任务级 Context Pack<br/>版本化 · 可审查 · 可重建"]
+    route["通过 Runtime Adapter 路由"]
+    runtime["Agent Runtime 执行<br/>Codex / Claude Code / CodeBuddy / OpenWorker"]
+    mcp["通过 MCP 调用共享工具<br/>文件 · 仓库 · 外部系统"]
+    artifact["产出 Artifact 与执行记录"]
+    review["人类或 Agent 审查<br/>审批 · 冲突识别 · 委派"]
+    memory["更新 Mu Project State<br/>项目记忆 · 事件 · 审计记录"]
+
+    project --> identity --> scope --> context --> route --> runtime
+    runtime --> mcp --> artifact --> review --> memory
+    memory --> context
+```
 
 ## Current verified scope
 
