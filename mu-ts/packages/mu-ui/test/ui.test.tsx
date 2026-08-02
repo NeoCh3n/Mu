@@ -17,6 +17,7 @@ beforeEach(() => {
     if (url === '/projects') return jsonResponse({ projects: [{ id: 'p1', displayName: 'Renderer', status: 'active', createdAt: new Date().toISOString() }] })
     if (url === '/agents') return jsonResponse({ agents: [] })
     if (url === '/endpoints') return jsonResponse({ endpoints: [] })
+    if (url === '/spaces') return jsonResponse({ spaces: [] })
     if (url === '/tasks') return jsonResponse({ tasks: [] })
     if (url === '/handoffs') return jsonResponse({ handoffs: [] })
     if (url === '/ledger') return jsonResponse({ events: [] })
@@ -100,6 +101,30 @@ describe('Mu UI', () => {
     )
     expect(await screen.findByText('Current Projects')).toBeTruthy()
     expect(await screen.findByText('Agents in the room')).toBeTruthy()
+  })
+
+  it('shows shared spaces and online collaborators on Overview', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/projects') return jsonResponse({ projects: [] })
+      if (url === '/agents') return jsonResponse({ agents: [] })
+      if (url === '/endpoints') return jsonResponse({ endpoints: [] })
+      if (url === '/tasks') return jsonResponse({ tasks: [] })
+      if (url === '/spaces') return jsonResponse({ spaces: [{ id: 'space-1', displayName: 'Design room', description: 'UI collaboration', status: 'active', version: 1, createdAt: '', updatedAt: '' }] })
+      if (url.startsWith('/spaces/space-1/sync')) return jsonResponse({ spaceID: 'space-1', afterSequence: 0, nextSequence: 2, events: [{ id: 'event-1', spaceID: 'space-1', actorID: 'actor-1', clientInstanceID: 'client-1', sequence: 1, eventType: 'thread.message', payload: {}, idempotencyKey: 'key-1', occurredAt: '' }], presence: [{ id: 'presence-1', spaceID: 'space-1', actorID: 'actor-1', clientInstanceID: 'client-1', displayName: 'Alice', state: 'online', lastSeenAt: '', expiresAt: '' }], hasMore: false })
+      if (url === '/spaces/space-1/presence') return jsonResponse({ presence: {} })
+      if (url === '/handoffs') return jsonResponse({ handoffs: [] })
+      if (url === '/ledger') return jsonResponse({ events: [] })
+      return jsonResponse({ error: 'not_found', message: 'nope' }, 404)
+    }))
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>,
+    )
+    expect((await screen.findAllByText('Design room')).length).toBeGreaterThan(0)
+    expect(await screen.findByText(/Alice/)).toBeTruthy()
+    expect(await screen.findByText('1 events')).toBeTruthy()
   })
 
   it('renders local control plane notification settings', async () => {

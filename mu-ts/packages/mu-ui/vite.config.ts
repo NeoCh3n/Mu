@@ -18,6 +18,7 @@ export default defineConfig({
       '/approvals': 'http://127.0.0.1:4000',
       '/handoffs': 'http://127.0.0.1:4000',
       '/ledger': 'http://127.0.0.1:4000',
+      '/spaces': 'http://127.0.0.1:4000',
     },
   },
   test: {
