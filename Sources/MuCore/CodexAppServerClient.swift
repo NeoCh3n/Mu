@@ -333,6 +333,7 @@ public final class CodexAppServerClient {
         additionalInstructions: String = "",
         clientUserMessageID: String,
         timeout: TimeInterval = 600,
+        model: String? = nil,
         onThreadStarted: (String) throws -> Void = { _ in },
         onTurnStarted: (String, String) throws -> Void = { _, _ in },
         onVisibleText:
@@ -354,6 +355,7 @@ public final class CodexAppServerClient {
             threadName: task.title,
             reconcileHistory: true,
             timeout: timeout,
+            model: model,
             onThreadStarted: onThreadStarted,
             onTurnStarted: onTurnStarted,
             onVisibleText: onVisibleText,
@@ -370,6 +372,7 @@ public final class CodexAppServerClient {
         prompt: String,
         clientUserMessageID: String,
         timeout: TimeInterval = 600,
+        model: String? = nil,
         onTurnStarted:
             (String, String) throws -> Void = { _, _ in },
         onVisibleText:
@@ -416,28 +419,31 @@ public final class CodexAppServerClient {
             )
         }
 
+        var turnParams: [String: Any] = [
+            "threadId": normalizedThreadID,
+            "input": [[
+                "type": "text",
+                "text": normalizedPrompt,
+                "text_elements": []
+            ]],
+            "cwd": task.repositoryPath,
+            "runtimeWorkspaceRoots": [
+                task.repositoryPath
+            ],
+            "approvalPolicy": "never",
+            "approvalsReviewer": "user",
+            "sandboxPolicy": [
+                "type": "readOnly",
+                "networkAccess": false
+            ],
+            "clientUserMessageId": clientUserMessageID
+        ]
+        if let model = Self.normalizedModel(model) {
+            turnParams["model"] = model
+        }
         let turnResponse = try request(
             method: "turn/start",
-            params: [
-                "threadId": normalizedThreadID,
-                "input": [[
-                    "type": "text",
-                    "text": normalizedPrompt,
-                    "text_elements": []
-                ]],
-                "cwd": task.repositoryPath,
-                "runtimeWorkspaceRoots": [
-                    task.repositoryPath
-                ],
-                "approvalPolicy": "never",
-                "approvalsReviewer": "user",
-                "sandboxPolicy": [
-                    "type": "readOnly",
-                    "networkAccess": false
-                ],
-                "clientUserMessageId":
-                    clientUserMessageID
-            ],
+            params: turnParams,
             timeout: 30
         )
         guard let turn =
@@ -522,6 +528,7 @@ public final class CodexAppServerClient {
         threadName: String?,
         reconcileHistory: Bool,
         timeout: TimeInterval,
+        model: String? = nil,
         onThreadStarted: (String) throws -> Void = { _ in },
         onTurnStarted: (String, String) throws -> Void = { _, _ in },
         onVisibleText:
@@ -579,6 +586,9 @@ public final class CodexAppServerClient {
         if let clientUserMessageID {
             turnParams["clientUserMessageId"] = clientUserMessageID
         }
+        if let model = Self.normalizedModel(model) {
+            turnParams["model"] = model
+        }
         let turnResponse = try request(
             method: "turn/start",
             params: turnParams,
@@ -633,6 +643,12 @@ public final class CodexAppServerClient {
             errorMessage: completion.errorMessage,
             historyReconciled: historyReconciled
         )
+    }
+
+    private static func normalizedModel(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
     }
 
     public func stop() {

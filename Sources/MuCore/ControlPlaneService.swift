@@ -412,7 +412,11 @@ public final class ControlPlaneService: @unchecked Sendable {
         }) {
             registeredOpenWorker.adapterVersion = "0.5.0"
             registeredOpenWorker.capabilities = []
-            registeredOpenWorker.permissionModel = .unknown
+            if (registeredOpenWorker.nativeConfiguration?[
+                RuntimeIdentityConfigurationKey.permissionModelSource
+            ] ?? "") != "user_configured" {
+                registeredOpenWorker.permissionModel = .unknown
+            }
             if let discovery = OpenWorkerDiscovery.discover() {
                 registeredOpenWorker.runtimeVersion = discovery.version
                 registeredOpenWorker.status = .discovered
@@ -776,7 +780,9 @@ public final class ControlPlaneService: @unchecked Sendable {
         surfaceKind: AgentRuntimeSurfaceKind = .unknown,
         instanceLabel: String = "",
         terminalIdentifier: String = "",
-        notes: String
+        notes: String,
+        defaultModel: String? = nil,
+        modelOptions: [String] = []
     ) throws -> RuntimeEndpoint {
         let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         let typeID = runtimeTypeID.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -831,6 +837,9 @@ public final class ControlPlaneService: @unchecked Sendable {
                 RuntimeIdentityConfigurationKey.nativeSource:
                     "user_configured"
             ]
+        nativeConfiguration[
+            RuntimeIdentityConfigurationKey.permissionModelSource
+        ] = "user_configured"
         if let path, !path.isEmpty {
             nativeConfiguration["executable"] = path
         }
@@ -839,6 +848,21 @@ public final class ControlPlaneService: @unchecked Sendable {
                 RuntimeIdentityConfigurationKey
                     .terminalIdentifier
             ] = normalizedTerminalIdentifier
+        }
+        let normalizedModel = Self.normalizedRuntimeModel(defaultModel)
+        let normalizedModels = Self.normalizedRuntimeModels(
+            modelOptions,
+            including: normalizedModel
+        )
+        if let normalizedModel {
+            nativeConfiguration[
+                RuntimeIdentityConfigurationKey.defaultModel
+            ] = normalizedModel
+        }
+        if !normalizedModels.isEmpty {
+            nativeConfiguration[
+                RuntimeIdentityConfigurationKey.modelOptions
+            ] = normalizedModels.joined(separator: ",")
         }
         let endpoint = RuntimeEndpoint(
             runtimeTypeID: typeID,
@@ -881,6 +905,85 @@ public final class ControlPlaneService: @unchecked Sendable {
         }
         try refreshRuntimeAdapterRegistrations()
         return endpoint
+    }
+
+    /// Updates the user-owned model and permission settings for one endpoint.
+    /// The adapter's safety contract remains authoritative: the current
+    /// Codex and Claude adapters still run read-only, even when a host's
+    /// permission model is changed here. This lets the UI describe the host
+    /// boundary without accidentally granting a write-capable turn.
+    @discardableResult
+    public func updateRuntimeSettings(
+        endpointID: UUID,
+        defaultModel: String?,
+        modelOptions: [String],
+        permissionModel: PermissionModel
+    ) throws -> RuntimeEndpoint {
+        guard var endpoint = try store.fetchRegisteredEndpoint(id: endpointID) else {
+            throw MuError.recordNotFound("Runtime endpoint \(endpointID)")
+        }
+        let normalizedModel = Self.normalizedRuntimeModel(defaultModel)
+        let normalizedModels = Self.normalizedRuntimeModels(
+            modelOptions,
+            including: normalizedModel
+        )
+        var configuration = endpoint.nativeConfiguration ?? [:]
+        if let normalizedModel {
+            configuration[RuntimeIdentityConfigurationKey.defaultModel] = normalizedModel
+        } else {
+            configuration.removeValue(
+                forKey: RuntimeIdentityConfigurationKey.defaultModel
+            )
+        }
+        if normalizedModels.isEmpty {
+            configuration.removeValue(
+                forKey: RuntimeIdentityConfigurationKey.modelOptions
+            )
+        } else {
+            configuration[RuntimeIdentityConfigurationKey.modelOptions] =
+                normalizedModels.joined(separator: ",")
+        }
+        configuration[RuntimeIdentityConfigurationKey.permissionModelSource] =
+            "user_configured"
+        endpoint.nativeConfiguration = configuration.isEmpty ? nil : configuration
+        endpoint.permissionModel = permissionModel
+        try store.withTransaction {
+            try store.upsertEndpoint(endpoint)
+            try store.appendEvent(
+                LedgerEvent(
+                    type: "endpoint.settings_updated",
+                    summary: "Updated Runtime settings for “\(endpoint.displayName)”.",
+                    payload: [
+                        "endpoint_id": endpoint.id.uuidString,
+                        "default_model": normalizedModel ?? "",
+                        "model_options": normalizedModels.joined(separator: ","),
+                        "permission_model": permissionModel.rawValue
+                    ]
+                )
+            )
+        }
+        try refreshRuntimeAdapterRegistrations()
+        return endpoint
+    }
+
+    private static func normalizedRuntimeModel(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private static func normalizedRuntimeModels(
+        _ values: [String],
+        including defaultModel: String?
+    ) -> [String] {
+        var seen = Set<String>()
+        var normalized = values
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+        if let defaultModel, seen.insert(defaultModel).inserted {
+            normalized.insert(defaultModel, at: 0)
+        }
+        return normalized
     }
 
     public func deleteEndpoint(id: UUID) throws {
@@ -1136,7 +1239,11 @@ public final class ControlPlaneService: @unchecked Sendable {
             endpoint.capabilities = result.loggedIn
                 ? Self.claudeCodeImplementedCapabilities
                 : []
-            endpoint.permissionModel = .promptGate
+            if (endpoint.nativeConfiguration?[
+                RuntimeIdentityConfigurationKey.permissionModelSource
+            ] ?? "") != "user_configured" {
+                endpoint.permissionModel = .promptGate
+            }
             endpoint.provenance = .vendorCLI
             endpoint.adapterVersion = "0.1.0"
             endpoint.lastProbedAt = Date()
@@ -1266,7 +1373,11 @@ public final class ControlPlaneService: @unchecked Sendable {
 
             endpoint.status = .active
             endpoint.capabilities = Self.openWorkerImplementedCapabilities
-            endpoint.permissionModel = .promptGate
+            if (endpoint.nativeConfiguration?[
+                RuntimeIdentityConfigurationKey.permissionModelSource
+            ] ?? "") != "user_configured" {
+                endpoint.permissionModel = .promptGate
+            }
             endpoint.provenance = .vendorProtocol
             endpoint.adapterVersion = "0.5.0"
             endpoint.lastProbedAt = Date()
@@ -1279,7 +1390,12 @@ public final class ControlPlaneService: @unchecked Sendable {
             nativeConfiguration["base_url"] = result.baseURL.absoluteString
             nativeConfiguration["connection_mode"] = "legacy_loopback"
             nativeConfiguration["default_agent"] = result.defaultAgent
-            nativeConfiguration["default_model"] = result.model
+            // Preserve an explicit user choice; only seed the host-reported
+            // model when this endpoint has never been configured.
+            if nativeConfiguration[RuntimeIdentityConfigurationKey.defaultModel]?
+                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                nativeConfiguration[RuntimeIdentityConfigurationKey.defaultModel] = result.model
+            }
             endpoint.nativeConfiguration = nativeConfiguration
 
             try store.withTransaction {
@@ -1307,7 +1423,11 @@ public final class ControlPlaneService: @unchecked Sendable {
         } catch {
             endpoint.status = .degraded
             endpoint.capabilities = []
-            endpoint.permissionModel = .unknown
+            if (endpoint.nativeConfiguration?[
+                RuntimeIdentityConfigurationKey.permissionModelSource
+            ] ?? "") != "user_configured" {
+                endpoint.permissionModel = .unknown
+            }
             endpoint.lastProbedAt = Date()
             endpoint.guaranteeNote =
                 "OpenWorker protocol probe failed. Mu will not route messages until a "
@@ -1551,6 +1671,8 @@ public final class ControlPlaneService: @unchecked Sendable {
                 additionalInstructions:
                     promptPreferences.codexAdditionalInstructions,
                 clientUserMessageID: initialRun.id.uuidString,
+                model: workspaceEntry?.requestedModel
+                    ?? endpoint.configuredDefaultModel,
                 onThreadStarted: { [store] threadID in
                     guard var stagedRun = try store.fetchRun(id: runID) else {
                         throw MuError.recordNotFound("Run \(runID)")
@@ -2257,7 +2379,8 @@ public final class ControlPlaneService: @unchecked Sendable {
     public func prepareWorkspaceMessage(
         taskID: UUID,
         text: String,
-        selectedEndpointID: UUID? = nil
+        selectedEndpointID: UUID? = nil,
+        requestedModel: String? = nil
     ) throws -> PreparedWorkspaceMessage {
         guard var task = try store.fetchTask(id: taskID) else {
             throw MuError.recordNotFound("Task \(taskID)")
@@ -2283,6 +2406,11 @@ public final class ControlPlaneService: @unchecked Sendable {
             endpoints: endpoints,
             selectedEndpointID: selectedEndpointID
         )
+        let normalizedRequestedModel = requestedModel?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveRequestedModel = normalizedRequestedModel?.isEmpty == false
+            ? normalizedRequestedModel
+            : nil
 
         guard let route else {
             let entry = ChatEntry(
@@ -2460,6 +2588,7 @@ public final class ControlPlaneService: @unchecked Sendable {
             runtimeSessionBindingID: binding?.id,
             nativeMessageIndexLowerBound:
                 binding?.lastSyncedMessageCount,
+            requestedModel: effectiveRequestedModel,
             deliveryState:
                 binding == nil
                 ? .awaitingSession

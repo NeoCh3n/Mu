@@ -671,6 +671,23 @@ struct RegisterRuntimeSheet: View {
                         }
                     }
 
+                    HStack(spacing: 14) {
+                        fieldGroup("DEFAULT MODEL · OPTIONAL") {
+                            TextField(
+                                "e.g. claude-sonnet-4-20250514",
+                                text: $draft.defaultModel
+                            )
+                            .textFieldStyle(.roundedBorder)
+                        }
+                        fieldGroup("MODEL OPTIONS · OPTIONAL") {
+                            TextField(
+                                "comma-separated model IDs",
+                                text: $draft.modelOptions
+                            )
+                            .textFieldStyle(.roundedBorder)
+                        }
+                    }
+
                     fieldGroup("EXECUTABLE · OPTIONAL") {
                         HStack {
                             TextField("/path/to/runtime", text: $draft.executablePath)
@@ -746,6 +763,96 @@ struct RegisterRuntimeSheet: View {
         if panel.runModal() == .OK {
             draft.executablePath = panel.url?.path ?? draft.executablePath
         }
+    }
+}
+
+struct RuntimeSettingsSheet: View {
+    @EnvironmentObject private var store: AppStore
+    @Environment(\.dismiss) private var dismiss
+    let endpoint: RuntimeEndpoint
+    @State private var defaultModel: String
+    @State private var modelOptions: String
+    @State private var permissionModel: PermissionModel
+
+    init(endpoint: RuntimeEndpoint) {
+        self.endpoint = endpoint
+        _defaultModel = State(initialValue: endpoint.configuredDefaultModel ?? "")
+        _modelOptions = State(
+            initialValue: endpoint.configuredModelOptions.joined(separator: ", ")
+        )
+        _permissionModel = State(initialValue: endpoint.permissionModel)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            sheetHeader(
+                title: "Configure \(endpoint.muInstanceDisplayName)",
+                subtitle: "Choose the model Mu requests and record this host's permission boundary.",
+                symbol: "slider.horizontal.3"
+            )
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Panel {
+                        VStack(alignment: .leading, spacing: 8) {
+                            EndpointBadge(endpoint: endpoint)
+                            Text(endpoint.guaranteeNote)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    fieldGroup("DEFAULT MODEL") {
+                        TextField("Leave empty for the host default", text: $defaultModel)
+                            .textFieldStyle(.roundedBorder)
+                        Text("Mu passes this identifier to the Runtime when the Task does not choose another model.")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+
+                    fieldGroup("AVAILABLE MODEL IDS · OPTIONAL") {
+                        TextField("model-a, model-b, model-c", text: $modelOptions)
+                            .textFieldStyle(.roundedBorder)
+                        Text("Comma-separated IDs make the model picker visible in Project chat. The default model is added automatically.")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+
+                    fieldGroup("PERMISSION LEVEL") {
+                        Picker("Permission level", selection: $permissionModel) {
+                            ForEach(PermissionModel.allCases, id: \.self) { model in
+                                Text(model.displayName).tag(model)
+                            }
+                        }
+                        .labelsHidden()
+                        Text("This records the Runtime's permission contract. Mu's current Codex and Claude adapters still enforce read-only execution.")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(24)
+            }
+            Divider()
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save settings") {
+                    store.updateRuntimeSettings(
+                        endpointID: endpoint.id,
+                        defaultModel: defaultModel,
+                        modelOptions: modelOptions,
+                        permissionModel: permissionModel
+                    )
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(MuPalette.violet)
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(18)
+        }
+        .frame(width: 700, height: 590)
     }
 }
 

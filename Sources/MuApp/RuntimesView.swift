@@ -210,6 +210,21 @@ private struct RuntimeCard: View {
                     showsEvidence: false
                 )
 
+                HStack(spacing: 10) {
+                    Label(
+                        endpoint.configuredDefaultModel.map { "Model · \($0)" }
+                            ?? "Model · Runtime default",
+                        systemImage: "cpu"
+                    )
+                    Label(
+                        "Permissions · \(endpoint.permissionModel.displayName)",
+                        systemImage: "lock"
+                    )
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+
                 Label(runtimeActionHint, systemImage: endpoint.status == .active ? "checkmark.circle" : "info.circle")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -261,6 +276,17 @@ private struct RuntimeCard: View {
                             "Open \(endpoint.muInstanceDisplayName) application"
                         )
                     }
+
+                    Button {
+                        store.openRuntimeSettings(endpoint)
+                    } label: {
+                        Label("Configure", systemImage: "slider.horizontal.3")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .accessibilityLabel(
+                        "Configure \(endpoint.muInstanceDisplayName) model and permissions"
+                    )
 
                     Spacer(minLength: 8)
 

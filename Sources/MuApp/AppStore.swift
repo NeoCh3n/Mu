@@ -109,6 +109,8 @@ struct RegisterRuntimeDraft {
     var location: EndpointLocation = .local
     var provenance: IntegrationProvenance = .vendorCLI
     var permissionModel: PermissionModel = .unknown
+    var defaultModel = ""
+    var modelOptions = ""
     var executablePath = ""
     var notes = ""
 
@@ -266,6 +268,7 @@ final class AppStore: ObservableObject {
     @Published var isCreatingTask = false
     @Published var isCreatingAgent = false
     @Published var isRegisteringRuntime = false
+    @Published var runtimeConfigurationEndpoint: RuntimeEndpoint?
     @Published var runtimeSetupProvider: MuRuntimeProvider?
     @Published var runtimeSetupExecutablePath = ""
     @Published var pendingRegistryDeletion: RegistryDeletion?
@@ -1814,7 +1817,8 @@ final class AppStore: ObservableObject {
     func sendChat(
         taskID: UUID,
         text: String,
-        endpointID: UUID? = nil
+        endpointID: UUID? = nil,
+        model: String? = nil
     ) {
         guard let service else { return }
         autoSummarizeTaskTitle(taskID: taskID, firstMessage: text)
@@ -1822,7 +1826,8 @@ final class AppStore: ObservableObject {
             let prepared = try service.prepareWorkspaceMessage(
                 taskID: taskID,
                 text: text,
-                selectedEndpointID: endpointID
+                selectedEndpointID: endpointID,
+                requestedModel: model
             )
             reload()
             // Publish the durable user message immediately; the later
@@ -2260,12 +2265,44 @@ final class AppStore: ObservableObject {
                 instanceLabel: draft.instanceLabel,
                 terminalIdentifier:
                     draft.terminalIdentifier,
-                notes: draft.notes
+                notes: draft.notes,
+                defaultModel: draft.defaultModel,
+                modelOptions: draft.modelOptions
+                    .split(whereSeparator: { $0 == "," || $0 == "\n" })
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             )
             reload()
             isRegisteringRuntime = false
             transientMessage =
                 "Runtime “\(endpoint.muInstanceDisplayName)” registered offline pending an adapter probe."
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func openRuntimeSettings(_ endpoint: RuntimeEndpoint) {
+        runtimeConfigurationEndpoint = endpoint
+    }
+
+    func updateRuntimeSettings(
+        endpointID: UUID,
+        defaultModel: String,
+        modelOptions: String,
+        permissionModel: PermissionModel
+    ) {
+        guard let service else { return }
+        do {
+            let updated = try service.updateRuntimeSettings(
+                endpointID: endpointID,
+                defaultModel: defaultModel,
+                modelOptions: modelOptions
+                    .split(whereSeparator: { $0 == "," || $0 == "\n" })
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) },
+                permissionModel: permissionModel
+            )
+            reload()
+            runtimeConfigurationEndpoint = nil
+            transientMessage = "Runtime settings for “\(updated.muInstanceDisplayName)” saved."
         } catch {
             errorMessage = error.localizedDescription
         }

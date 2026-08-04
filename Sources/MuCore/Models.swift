@@ -235,6 +235,9 @@ public struct ChatEntry: Identifiable, Codable, Hashable, Sendable {
     public var runtimeSessionBindingID: UUID?
     public var nativeMessageIndex: Int?
     public var nativeMessageIndexLowerBound: Int?
+    /// Optional per-message model override chosen in the Project composer.
+    /// The endpoint default remains authoritative when this is nil.
+    public var requestedModel: String?
     public var deliveryState: ChatDeliveryState?
     public var routedText: String?
     public var contextFreeRoutedText: String?
@@ -258,6 +261,7 @@ public struct ChatEntry: Identifiable, Codable, Hashable, Sendable {
         runtimeSessionBindingID: UUID? = nil,
         nativeMessageIndex: Int? = nil,
         nativeMessageIndexLowerBound: Int? = nil,
+        requestedModel: String? = nil,
         deliveryState: ChatDeliveryState? = nil,
         routedText: String? = nil,
         contextFreeRoutedText: String? = nil,
@@ -280,6 +284,7 @@ public struct ChatEntry: Identifiable, Codable, Hashable, Sendable {
         self.runtimeSessionBindingID = runtimeSessionBindingID
         self.nativeMessageIndex = nativeMessageIndex
         self.nativeMessageIndexLowerBound = nativeMessageIndexLowerBound
+        self.requestedModel = requestedModel
         self.deliveryState = deliveryState
         self.routedText = routedText
         self.contextFreeRoutedText = contextFreeRoutedText

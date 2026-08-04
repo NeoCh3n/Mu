@@ -199,8 +199,10 @@ export const api = {
     request<{ endpoint: Endpoint }>(`/endpoints/${endpointID}`, { method: 'DELETE' }),
   removeDuplicateDiscoveredEndpoints: () =>
     request<{ removedEndpointIDs: string[] }>('/endpoints/cleanup-duplicates', { method: 'POST' }),
-  createEndpoint: (params: { runtimeTypeID: string; displayName: string; runtimeVersion: string; location: string; executablePath?: string; surfaceKind?: string; instanceLabel?: string }) =>
+  createEndpoint: (params: { runtimeTypeID: string; displayName: string; runtimeVersion: string; location: string; executablePath?: string; surfaceKind?: string; instanceLabel?: string; permissionModel?: string; defaultModel?: string; modelOptions?: string[] }) =>
     request<{ endpoint: Endpoint }>('/endpoints', { method: 'POST', body: JSON.stringify(params) }),
+  updateEndpointSettings: (endpointID: string, params: { permissionModel: string; defaultModel?: string; modelOptions?: string[] }) =>
+    request<{ endpoint: Endpoint }>(`/endpoints/${endpointID}`, { method: 'PATCH', body: JSON.stringify(params) }),
   probeEndpoints: () => request<{ outcomes: Array<{ endpointID: string; ok: boolean; message: string }> }>(
     '/endpoints/probe',
     { method: 'POST' },

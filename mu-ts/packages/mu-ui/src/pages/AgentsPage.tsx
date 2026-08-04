@@ -22,6 +22,11 @@ export function AgentsPage() {
   const [runtimePath, setRuntimePath] = useState('')
   const [configuringRuntime, setConfiguringRuntime] = useState(false)
   const [probingRuntime, setProbingRuntime] = useState<string | undefined>()
+  const [runtimeSettingsEndpoint, setRuntimeSettingsEndpoint] = useState<Endpoint | undefined>()
+  const [settingsDefaultModel, setSettingsDefaultModel] = useState('')
+  const [settingsModelOptions, setSettingsModelOptions] = useState('')
+  const [settingsPermissionModel, setSettingsPermissionModel] = useState('fine_grained')
+  const [savingRuntimeSettings, setSavingRuntimeSettings] = useState(false)
   const endpoints = endpointData?.endpoints ?? []
 
   const primaryEndpoints = useMemo(() => {
@@ -110,6 +115,31 @@ export function AgentsPage() {
     }
   }
 
+  function openRuntimeSettings(endpoint: Endpoint): void {
+    setRuntimeSettingsEndpoint(endpoint)
+    setSettingsDefaultModel(endpoint.nativeConfiguration?.default_model ?? '')
+    setSettingsModelOptions(endpoint.nativeConfiguration?.model_options?.split(',').map((value) => value.trim()).filter(Boolean).join(', ') ?? '')
+    setSettingsPermissionModel(endpoint.permissionModel ?? 'fine_grained')
+  }
+
+  async function saveRuntimeSettings(): Promise<void> {
+    if (runtimeSettingsEndpoint === undefined) return
+    setSavingRuntimeSettings(true)
+    try {
+      await api.updateEndpointSettings(runtimeSettingsEndpoint.id, {
+        permissionModel: settingsPermissionModel,
+        defaultModel: settingsDefaultModel.trim() === '' ? undefined : settingsDefaultModel.trim(),
+        modelOptions: settingsModelOptions.split(',').map((value) => value.trim()).filter(Boolean),
+      })
+      setRuntimeSettingsEndpoint(undefined)
+      reloadEndpoints()
+    } catch (reason) {
+      console.error(reason)
+    } finally {
+      setSavingRuntimeSettings(false)
+    }
+  }
+
   return (
     <Page title={t('Agents & Runtimes', 'Agents 与运行时')} subtitle={t('Choose a configured local Runtime when a Project starts. Agent identities are created only when you explicitly need a reusable alias.', 'Project 开始任务时选择已配置的本地 Runtime。只有明确需要可复用别名时，才创建 Agent 身份。')}>
       {error !== undefined && <ErrorBanner message={error} />}
@@ -162,10 +192,11 @@ export function AgentsPage() {
           </div>
         </div>
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {primaryEndpoints.map((endpoint) => <RuntimeCompactCard key={endpoint.id} endpoint={endpoint} onRemove={() => void removeEndpoint(endpoint)} language={settings.language} />)}
+          {primaryEndpoints.map((endpoint) => <RuntimeCompactCard key={endpoint.id} endpoint={endpoint} onRemove={() => void removeEndpoint(endpoint)} onConfigure={() => openRuntimeSettings(endpoint)} language={settings.language} />)}
           {primaryEndpoints.length === 0 && <Empty message={t('No useful runtime endpoints yet.', '还没有可用的运行时 endpoint。')} />}
         </div>
-        {otherEndpoints.length > 0 && <div className="mt-3 rounded-xl border border-zinc-800 bg-zinc-950/40 p-3"><button type="button" onClick={() => setShowOtherRuntimes((current) => !current)} className="flex w-full items-center justify-between text-left text-sm font-medium text-zinc-300"><span>{t('Other discovered runtimes', '其他已发现的运行时')} · {otherEndpoints.length}</span><span className="text-xs text-zinc-600">{showOtherRuntimes ? t('Hide', '隐藏') : t('Show', '显示')}</span></button>{showOtherRuntimes && <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{otherEndpoints.map((endpoint) => <RuntimeCompactCard key={endpoint.id} endpoint={endpoint} onRemove={() => void removeEndpoint(endpoint)} language={settings.language} />)}</div>}</div>}
+        {otherEndpoints.length > 0 && <div className="mt-3 rounded-xl border border-zinc-800 bg-zinc-950/40 p-3"><button type="button" onClick={() => setShowOtherRuntimes((current) => !current)} className="flex w-full items-center justify-between text-left text-sm font-medium text-zinc-300"><span>{t('Other discovered runtimes', '其他已发现的运行时')} · {otherEndpoints.length}</span><span className="text-xs text-zinc-600">{showOtherRuntimes ? t('Hide', '隐藏') : t('Show', '显示')}</span></button>{showOtherRuntimes && <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{otherEndpoints.map((endpoint) => <RuntimeCompactCard key={endpoint.id} endpoint={endpoint} onRemove={() => void removeEndpoint(endpoint)} onConfigure={() => openRuntimeSettings(endpoint)} language={settings.language} />)}</div>}</div>}
+        {runtimeSettingsEndpoint !== undefined && <form onSubmit={(event) => { event.preventDefault(); void saveRuntimeSettings() }} className="mt-4 rounded-xl border border-violet-900/60 bg-violet-950/20 p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="text-sm font-medium text-violet-100">{t('Configure runtime', '配置运行时')} · {runtimeSettingsEndpoint.displayName}</h3><p className="mt-1 text-xs leading-5 text-zinc-400">{t('Model is sent to the host for the next turn. Mu still enforces its current read-only safety boundary.', '模型会在下一轮发送给 host。Mu 仍会强制当前的只读安全边界。')}</p></div><button type="button" onClick={() => setRuntimeSettingsEndpoint(undefined)} className="rounded px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-800">{t('Cancel', '取消')}</button></div><div className="grid gap-3 md:grid-cols-3"><label className="text-xs text-zinc-400"><span className="mb-1 block">{t('Default model', '默认模型')}</span><input value={settingsDefaultModel} onChange={(event) => setSettingsDefaultModel(event.target.value)} placeholder="host default" className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-100" /></label><label className="text-xs text-zinc-400"><span className="mb-1 block">{t('Model IDs', '模型 ID')}</span><input value={settingsModelOptions} onChange={(event) => setSettingsModelOptions(event.target.value)} placeholder="model-a, model-b" className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-100" /></label><label className="text-xs text-zinc-400"><span className="mb-1 block">{t('Permission level', '权限等级')}</span><select value={settingsPermissionModel} onChange={(event) => setSettingsPermissionModel(event.target.value)} className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100"><option value="fine_grained">Fine-grained</option><option value="prompt_gate">Prompt gate</option><option value="all_or_nothing">All or nothing</option><option value="none">No permissions</option><option value="unknown">Runtime-defined</option></select></label></div><div className="mt-3 flex justify-end"><button type="submit" disabled={savingRuntimeSettings} className="rounded-md bg-violet-600 px-3 py-2 text-xs text-white disabled:opacity-40">{savingRuntimeSettings ? t('Saving…', '保存中…') : t('Save settings', '保存设置')}</button></div></form>}
       </section>
     </Page>
   )
@@ -218,11 +249,13 @@ function duplicateDiscoveredEndpointIDs(endpoints: Endpoint[]): string[] {
   return [...groups.values()].flatMap((items) => items.sort((left, right) => right.lastProbedAt.localeCompare(left.lastProbedAt)).slice(1).map((endpoint) => endpoint.id))
 }
 
-function RuntimeCompactCard({ endpoint, onRemove, language }: { endpoint: Endpoint; onRemove: () => void; language: 'en' | 'zh-Hans' }) {
+function RuntimeCompactCard({ endpoint, onRemove, onConfigure, language }: { endpoint: Endpoint; onRemove: () => void; onConfigure: () => void; language: 'en' | 'zh-Hans' }) {
   const identity = endpoint.instanceIdentity
   const surface = identity?.surfaceKind === 'desktop_app' || identity?.surfaceKind === 'desktop_application' ? 'Desktop' : identity?.surfaceKind === 'terminal_cli' ? 'Terminal' : 'Runtime'
   const state = endpoint.status === 'active' ? text(language, 'Ready', '就绪') : endpoint.status === 'discovered' && hasRuntimeEvidence(endpoint) ? text(language, 'Found', '已发现') : endpoint.status === 'discovered' ? text(language, 'Unverified', '未验证') : text(language, 'Needs setup', '需要配置')
-  return <article className="rounded-xl border border-zinc-800 bg-zinc-900/70 p-4"><div className="flex items-start gap-3"><span className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${endpoint.status === 'active' ? 'bg-emerald-400' : endpoint.status === 'discovered' && hasRuntimeEvidence(endpoint) ? 'bg-amber-400' : 'bg-zinc-600'}`} /><div className="min-w-0 flex-1"><h3 className="truncate text-sm font-medium text-zinc-100">{endpoint.displayName}</h3><p className="mt-1 text-xs leading-5 text-zinc-500">{runtimeSummary(endpoint, language)}</p></div><span className="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-400">{surface}</span></div><div className="mt-4 flex items-center justify-between gap-3 border-t border-zinc-800 pt-3 text-[11px] text-zinc-500"><span className="truncate">{identity?.instanceLabel ?? identity?.terminalIdentifier ?? text(language, 'Identity pending', '等待身份')}</span><div className="flex items-center gap-2"><span className="shrink-0">{state}</span><button type="button" onClick={onRemove} className="rounded px-2 py-1 text-zinc-500 hover:bg-red-950 hover:text-red-200">{text(language, 'Remove', '移除')}</button></div></div></article>
+  const configuredModel = endpoint.nativeConfiguration?.default_model ?? text(language, 'Runtime default', 'Runtime 默认')
+  const configuredPermission = endpoint.permissionModel ?? 'unknown'
+  return <article className="rounded-xl border border-zinc-800 bg-zinc-900/70 p-4"><div className="flex items-start gap-3"><span className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${endpoint.status === 'active' ? 'bg-emerald-400' : endpoint.status === 'discovered' && hasRuntimeEvidence(endpoint) ? 'bg-amber-400' : 'bg-zinc-600'}`} /><div className="min-w-0 flex-1"><h3 className="truncate text-sm font-medium text-zinc-100">{endpoint.displayName}</h3><p className="mt-1 text-xs leading-5 text-zinc-500">{runtimeSummary(endpoint, language)}</p><p className="mt-2 truncate text-[11px] text-zinc-500">{text(language, 'Model', '模型')}: {configuredModel} · {text(language, 'Permissions', '权限')}: {configuredPermission}</p></div><span className="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-400">{surface}</span></div><div className="mt-4 flex items-center justify-between gap-3 border-t border-zinc-800 pt-3 text-[11px] text-zinc-500"><span className="truncate">{identity?.instanceLabel ?? identity?.terminalIdentifier ?? text(language, 'Identity pending', '等待身份')}</span><div className="flex items-center gap-2"><span className="shrink-0">{state}</span><button type="button" onClick={onConfigure} className="rounded px-2 py-1 text-zinc-400 hover:bg-zinc-800">{text(language, 'Configure', '配置')}</button><button type="button" onClick={onRemove} className="rounded px-2 py-1 text-zinc-500 hover:bg-red-950 hover:text-red-200">{text(language, 'Remove', '移除')}</button></div></div></article>
 }
 
 function runtimeSummary(endpoint: Endpoint, language: 'en' | 'zh-Hans'): string {

@@ -35,6 +35,10 @@ struct RootView: View {
             RegisterRuntimeSheet(provider: store.runtimeSetupProvider)
                 .environmentObject(store)
         }
+        .sheet(item: $store.runtimeConfigurationEndpoint) { endpoint in
+            RuntimeSettingsSheet(endpoint: endpoint)
+                .environmentObject(store)
+        }
         .sheet(item: $store.checkpointForHandoff) { checkpoint in
             HandoffProposalSheet(checkpoint: checkpoint)
                 .environmentObject(store)

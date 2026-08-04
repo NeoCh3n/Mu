@@ -639,6 +639,7 @@ private struct WorkspaceChatSurface: View {
                             } label: {
                                 Label(
                                     selectedModel
+                                        ?? selectedRuntime?.configuredDefaultModel
                                         ?? (store.interfaceLanguage == .simplifiedChinese
                                             ? "选择模型"
                                             : "Choose model"),
@@ -650,8 +651,8 @@ private struct WorkspaceChatSurface: View {
                         } else {
                             StatusPill(
                                 label: store.interfaceLanguage == .simplifiedChinese
-                                    ? "模型：Runtime 默认"
-                                    : "Model: Runtime default",
+                                    ? "模型：\(selectedRuntime?.configuredDefaultModel ?? "Runtime 默认")"
+                                    : "Model: \(selectedRuntime?.configuredDefaultModel ?? "Runtime default")",
                                 color: .secondary,
                                 symbol: "cpu"
                             )
@@ -825,7 +826,8 @@ private struct WorkspaceChatSurface: View {
         store.sendChat(
             taskID: task.id,
             text: value,
-            endpointID: selectedRuntime?.id
+            endpointID: selectedRuntime?.id,
+            model: selectedModel
         )
     }
 

@@ -503,6 +503,7 @@ public final class ClaudeCodeClient:
         resumeSessionID: String? = nil,
         promptOverride: String? = nil,
         additionalSystemPrompt: String = "",
+        model: String? = nil,
         onSessionStarted:
             @escaping @Sendable (String) throws -> Void = { _ in },
         onVisibleText:
@@ -539,7 +540,8 @@ public final class ClaudeCodeClient:
             sessionID: sessionID,
             resumeSessionID: resumeSessionID,
             promptOverride: promptOverride,
-            additionalSystemPrompt: additionalSystemPrompt
+            additionalSystemPrompt: additionalSystemPrompt,
+            model: model
         )
         let outputPipe = Pipe()
         let errorPipe = Pipe()
@@ -656,7 +658,8 @@ public final class ClaudeCodeClient:
         sessionID: String,
         resumeSessionID: String?,
         promptOverride: String?,
-        additionalSystemPrompt: String = ""
+        additionalSystemPrompt: String = "",
+        model: String? = nil
     ) -> [String] {
         let baseSystemPrompt =
             "You are an Agent Actor working through Mu. "
@@ -680,6 +683,12 @@ public final class ClaudeCodeClient:
             ),
             "--name", "Mu · \(task.title)"
         ]
+        if let model {
+            let normalizedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !normalizedModel.isEmpty {
+                values.insert(contentsOf: ["--model", normalizedModel], at: 4)
+            }
+        }
         if let resumeSessionID {
             values.append(contentsOf: [
                 "--resume",
