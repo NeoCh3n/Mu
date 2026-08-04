@@ -360,6 +360,9 @@ public struct SpaceEventRecord: Identifiable, Codable, Hashable, Sendable {
     public var threadID: UUID?
     public var actorID: UUID?
     public var principalID: UUID?
+    /// The concrete Mu process that authored the event. This stays optional
+    /// for legacy local records, while matching the shared Space wire format.
+    public var clientInstanceID: String?
     public var sequence: Int64
     public var eventType: String
     public var payload: [String: String]
@@ -372,6 +375,7 @@ public struct SpaceEventRecord: Identifiable, Codable, Hashable, Sendable {
         threadID: UUID? = nil,
         actorID: UUID? = nil,
         principalID: UUID? = nil,
+        clientInstanceID: String? = nil,
         sequence: Int64,
         eventType: String,
         payload: [String: String] = [:],
@@ -383,6 +387,7 @@ public struct SpaceEventRecord: Identifiable, Codable, Hashable, Sendable {
         self.threadID = threadID
         self.actorID = actorID
         self.principalID = principalID
+        self.clientInstanceID = clientInstanceID
         self.sequence = sequence
         self.eventType = eventType
         self.payload = payload

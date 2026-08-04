@@ -106,8 +106,11 @@ struct AgentWorkspaceView: View {
                             .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
                 }
-            }
+        }
         .background(Color(nsColor: .textBackgroundColor).opacity(0.28))
+        .task(id: store.collaborationSpaceID(for: task)) {
+            store.connectToCollaboration(for: task)
+        }
     }
 
     private var workspaceHeader: some View {
@@ -3879,6 +3882,80 @@ private struct WorkspaceInspector: View {
                     Label("State saves continuously", systemImage: "checkmark.circle.fill")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(MuPalette.mint)
+                }
+
+                if let spaceID = store.collaborationSpaceID(for: task) {
+                    inspectorSection("SHARED SPACE") {
+                        let sharedEvents = store.collaborationEvents(for: task)
+                        let presence = store.collaborationPresence(for: task)
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 7) {
+                                Circle()
+                                    .fill(
+                                        store.collaborationConnectionState == .connected
+                                            ? MuPalette.mint
+                                        : store.collaborationConnectionState == .connecting
+                                                ? .orange
+                                                : Color.secondary
+                                    )
+                                    .frame(width: 7, height: 7)
+                                Text(
+                                    store.collaborationConnectionState == .connected
+                                        ? "Live shared Space"
+                                        : store.collaborationConnectionState == .connecting
+                                            ? "Connecting…"
+                                            : "Local-only; server unavailable"
+                                )
+                                .font(.caption.weight(.semibold))
+                                Spacer(minLength: 0)
+                                Text("\(presence.count) present")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text(spaceID.uuidString.lowercased())
+                                .font(.caption2.monospaced())
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+
+                            if !presence.isEmpty {
+                                Text(presence.map(\.displayName).joined(separator: " · "))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+
+                            if sharedEvents.isEmpty {
+                                Text("No shared messages yet.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                ForEach(Array(sharedEvents.suffix(6))) { event in
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        HStack(spacing: 5) {
+                                            Text(event.payload["authorName"] ?? "Collaborator")
+                                                .font(.caption2.weight(.semibold))
+                                            Text("·")
+                                                .foregroundStyle(.tertiary)
+                                            Text(event.eventType)
+                                                .font(.caption2.monospaced())
+                                                .foregroundStyle(.tertiary)
+                                        }
+                                        Text(event.payload["text"] ?? event.payload["summary"] ?? "Shared update")
+                                            .font(.caption)
+                                            .lineLimit(3)
+                                    }
+                                    .padding(.vertical, 2)
+                                }
+                            }
+                            if let error = store.collaborationError {
+                                Text(error)
+                                    .font(.caption2)
+                                    .foregroundStyle(MuPalette.coral)
+                                    .lineLimit(3)
+                            }
+                        }
+                    }
                 }
 
                 inspectorSection("TOOL SCOPE") {

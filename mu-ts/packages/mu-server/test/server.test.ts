@@ -279,6 +279,32 @@ describe('Mu HTTP API', () => {
       const { app } = mu
       const actorA = '00000000-0000-4000-8000-0000000000a1'
       const actorB = '00000000-0000-4000-8000-0000000000b2'
+      const deterministicSpaceID = '00000000-0000-4000-8000-0000000000c3'
+      const ensured = await app.inject({
+        method: 'PUT',
+        url: `/spaces/${deterministicSpaceID}`,
+        headers: {
+          'x-mu-actor-id': actorA,
+          'x-mu-client-instance-id': 'mac-a',
+          'x-mu-display-name': 'Alice',
+        },
+        payload: { displayName: 'Native Project room' },
+      })
+      expect(ensured.statusCode).toBe(201)
+      expect(ensured.json<{ space: { id: string }; created: boolean }>()).toMatchObject({
+        space: { id: deterministicSpaceID },
+        created: true,
+      })
+      const ensuredAgain = await app.inject({
+        method: 'PUT',
+        url: `/spaces/${deterministicSpaceID}`,
+        payload: { displayName: 'A later label' },
+      })
+      expect(ensuredAgain.statusCode).toBe(200)
+      expect(ensuredAgain.json<{ space: { displayName: string }; created: boolean }>()).toMatchObject({
+        space: { displayName: 'Native Project room' },
+        created: false,
+      })
       const spaceResponse = await app.inject({
         method: 'POST',
         url: '/spaces',

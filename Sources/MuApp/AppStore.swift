@@ -167,6 +167,12 @@ struct CompletionToast: Identifiable, Equatable {
     }
 }
 
+enum CollaborationConnectionState: String {
+    case offline
+    case connecting
+    case connected
+}
+
 @MainActor
 final class AppStore: ObservableObject {
     private static let seededStarterAgentIDs: Set<UUID> = [
@@ -324,7 +330,21 @@ final class AppStore: ObservableObject {
         }
     }
 
+    // Shared Space transport state. The native UI observes the same ordered
+    // event stream as the TS client; Runtime receipts remain local and are
+    // not copied into this durable collaboration history.
+    @Published private(set) var collaborationSpaces: [CollaborationSpaceRecord] = []
+    @Published private(set) var collaborationEventsBySpace: [UUID: [SpaceEventRecord]] = [:]
+    @Published private(set) var collaborationPresenceBySpace: [UUID: [PresenceSessionRecord]] = [:]
+    @Published private(set) var collaborationConnectionState: CollaborationConnectionState = .offline
+    @Published private(set) var collaborationError: String?
+
     private(set) var service: ControlPlaneService?
+    private let collaborationClient: CollaborationHTTPClient?
+    private var collaborationSequencesBySpace: [UUID: Int64] = [:]
+    private var collaborationStreamTasks: [UUID: Task<Void, Never>] = [:]
+    private var collaborationJoinTasks: [UUID: Task<Void, Never>] = [:]
+    private var collaborationHeartbeatTasks: [UUID: Task<Void, Never>] = [:]
     let workspaceService = WorkspaceService()
     private var openWorkerBridges: [UUID: OpenWorkerSessionBridge] = [:]
     private var openWorkerBridgeConnectionTasks:
@@ -336,6 +356,12 @@ final class AppStore: ObservableObject {
     private var completionToastDismissTask: Task<Void, Never>?
 
     init(service: ControlPlaneService? = nil) {
+        let collaborationIdentity = CollaborationClientIdentity.local()
+        self.collaborationClient = try? CollaborationHTTPClient(
+            configuration: CollaborationHTTPClientConfiguration(
+                identity: collaborationIdentity
+            )
+        )
         do {
             self.service = try service ?? ControlPlaneService()
             self.service?.runtimePromptPreferences = RuntimePromptPreferences(
@@ -352,6 +378,9 @@ final class AppStore: ObservableObject {
             }
             Task { [weak self] in
                 await self?.verifyOpenWorkerAndRestoreObservers()
+            }
+            Task { [weak self] in
+                await self?.discoverCollaborationSpaces()
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -1071,6 +1100,247 @@ final class AppStore: ObservableObject {
         events.filter { $0.taskID == taskID }
     }
 
+    func collaborationSpaceID(for task: TaskRecord) -> UUID? {
+        task.spaceID
+            ?? task.projectID
+            ?? projectLink(for: task.id)?.projectID
+            ?? task.workspaceID
+    }
+
+    func collaborationEvents(for task: TaskRecord) -> [SpaceEventRecord] {
+        guard let spaceID = collaborationSpaceID(for: task) else { return [] }
+        let taskKey = task.id.uuidString.lowercased()
+        return collaborationEventsBySpace[spaceID, default: []].filter { event in
+            event.threadID == task.threadID
+                || event.payload["taskID"]?.lowercased() == taskKey
+        }
+    }
+
+    func collaborationPresence(for task: TaskRecord) -> [PresenceSessionRecord] {
+        guard let spaceID = collaborationSpaceID(for: task) else { return [] }
+        return collaborationPresenceBySpace[spaceID, default: []]
+    }
+
+    /// Joins the Project-backed Space lazily when a native workspace is opened.
+    /// This keeps startup fast and avoids treating an unavailable local server
+    /// as a task/runtime failure.
+    func connectToCollaboration(for task: TaskRecord) {
+        guard let spaceID = collaborationSpaceID(for: task),
+              collaborationClient != nil else { return }
+        guard collaborationJoinTasks[spaceID] == nil else { return }
+        collaborationJoinTasks[spaceID] = Task { [weak self] in
+            await self?.joinCollaborationSpace(spaceID, task: task)
+        }
+    }
+
+    private func discoverCollaborationSpaces() async {
+        guard let collaborationClient else { return }
+        collaborationConnectionState = .connecting
+        do {
+            collaborationSpaces = try await collaborationClient.listSpaces()
+            collaborationConnectionState = .connected
+            collaborationError = nil
+        } catch {
+            // The native app remains useful in local-only mode while the TS
+            // control plane is stopped. The status is visible in Environment
+            // and will recover on the first Project join.
+            collaborationConnectionState = .offline
+        }
+    }
+
+    private func joinCollaborationSpace(
+        _ spaceID: UUID,
+        task: TaskRecord
+    ) async {
+        defer { collaborationJoinTasks[spaceID] = nil }
+        guard let collaborationClient else { return }
+        collaborationConnectionState = .connecting
+        do {
+            let displayName = projectRecord(for: task.id)?.displayName
+                ?? task.title
+            let space = try await collaborationClient.ensureSpace(
+                id: spaceID,
+                displayName: displayName,
+                description: task.objective
+            )
+            mergeCollaborationSpace(space)
+            try await syncCollaborationSpace(spaceID)
+            _ = try await collaborationClient.heartbeatPresence(spaceID: spaceID)
+            try await syncCollaborationSpace(spaceID)
+            collaborationConnectionState = .connected
+            collaborationError = nil
+            startCollaborationStream(spaceID: spaceID, client: collaborationClient)
+            startCollaborationHeartbeat(spaceID: spaceID, client: collaborationClient)
+        } catch {
+            collaborationConnectionState = .offline
+            collaborationError = error.localizedDescription
+        }
+    }
+
+    private func startCollaborationStream(
+        spaceID: UUID,
+        client: CollaborationHTTPClient
+    ) {
+        guard collaborationStreamTasks[spaceID] == nil else { return }
+        collaborationStreamTasks[spaceID] = Task { [weak self] in
+            do {
+                for try await envelope in client.streamEvents(spaceID: spaceID) {
+                    guard let self else { return }
+                    switch envelope {
+                    case .spaceEvent(let event):
+                        mergeCollaborationEvent(event)
+                    case .presence(let presence):
+                        mergeCollaborationPresence(presence)
+                    }
+                    collaborationConnectionState = .connected
+                    collaborationError = nil
+                }
+            } catch {
+                guard let self, !Task.isCancelled else { return }
+                collaborationConnectionState = .offline
+                collaborationError = error.localizedDescription
+            }
+            if !Task.isCancelled {
+                self?.collaborationStreamTasks[spaceID] = nil
+            }
+        }
+    }
+
+    private func syncCollaborationSpace(_ spaceID: UUID) async throws {
+        guard let collaborationClient else { return }
+        let after = collaborationSequencesBySpace[spaceID] ?? 0
+        let batch = try await collaborationClient.syncSpace(
+            id: spaceID,
+            afterSequence: after
+        )
+        for event in batch.events {
+            mergeCollaborationEvent(event)
+        }
+        collaborationPresenceBySpace[spaceID] = batch.presence.sorted {
+            if $0.state != $1.state { return $0.state == .online }
+            return $0.lastSeenAt > $1.lastSeenAt
+        }
+        collaborationSequencesBySpace[spaceID] = max(
+            after,
+            max(batch.nextSequence, batch.events.map(\.sequence).max() ?? after)
+        )
+    }
+
+    private func startCollaborationHeartbeat(
+        spaceID: UUID,
+        client: CollaborationHTTPClient
+    ) {
+        guard collaborationHeartbeatTasks[spaceID] == nil else { return }
+        collaborationHeartbeatTasks[spaceID] = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(20))
+                    guard let self, !Task.isCancelled else { return }
+                    let presence = try await client.heartbeatPresence(spaceID: spaceID)
+                    mergeCollaborationPresence(presence)
+                    collaborationConnectionState = .connected
+                    collaborationError = nil
+                } catch {
+                    guard let self, !Task.isCancelled else { return }
+                    collaborationConnectionState = .offline
+                    collaborationError = error.localizedDescription
+                    self.collaborationHeartbeatTasks[spaceID] = nil
+                    return
+                }
+            }
+            self?.collaborationHeartbeatTasks[spaceID] = nil
+        }
+    }
+
+    private func mergeCollaborationSpace(_ space: CollaborationSpaceRecord) {
+        if let index = collaborationSpaces.firstIndex(where: { $0.id == space.id }) {
+            collaborationSpaces[index] = space
+        } else {
+            collaborationSpaces.append(space)
+        }
+        collaborationSpaces.sort { $0.updatedAt > $1.updatedAt }
+    }
+
+    private func mergeCollaborationEvent(_ event: SpaceEventRecord) {
+        var events = collaborationEventsBySpace[event.spaceID, default: []]
+        if let index = events.firstIndex(where: { $0.id == event.id }) {
+            events[index] = event
+        } else {
+            events.append(event)
+        }
+        events.sort {
+            if $0.sequence != $1.sequence { return $0.sequence < $1.sequence }
+            return $0.occurredAt < $1.occurredAt
+        }
+        collaborationEventsBySpace[event.spaceID] = events
+        collaborationSequencesBySpace[event.spaceID] = max(
+            collaborationSequencesBySpace[event.spaceID] ?? 0,
+            event.sequence
+        )
+    }
+
+    private func mergeCollaborationPresence(_ presence: PresenceSessionRecord) {
+        var sessions = collaborationPresenceBySpace[presence.spaceID, default: []]
+        if let index = sessions.firstIndex(where: { $0.id == presence.id }) {
+            sessions[index] = presence
+        } else {
+            sessions.append(presence)
+        }
+        collaborationPresenceBySpace[presence.spaceID] = sessions.filter {
+            !$0.isExpired()
+        }.sorted {
+            if $0.state != $1.state { return $0.state == .online }
+            return $0.lastSeenAt > $1.lastSeenAt
+        }
+    }
+
+    private func publishWorkspaceChat(taskID: UUID) {
+        guard let task = task(id: taskID),
+              let spaceID = collaborationSpaceID(for: task),
+              collaborationClient != nil else { return }
+        let entries = chat(for: taskID)
+        Task { [weak self] in
+            guard let self, let collaborationClient else { return }
+            do {
+                let displayName = projectRecord(for: task.id)?.displayName ?? task.title
+                let space = try await collaborationClient.ensureSpace(
+                    id: spaceID,
+                    displayName: displayName,
+                    description: task.objective
+                )
+                mergeCollaborationSpace(space)
+                for entry in entries {
+                    var payload: [String: String] = [
+                        "taskID": taskID.uuidString.lowercased(),
+                        "entryID": entry.id.uuidString.lowercased(),
+                        "authorKind": entry.authorKind.rawValue,
+                        "authorName": entry.authorName,
+                        "text": entry.text
+                    ]
+                    if let threadID = entry.threadID ?? task.threadID {
+                        payload["threadID"] = threadID.uuidString.lowercased()
+                    }
+                    let event = try await collaborationClient.appendEvent(
+                        spaceID: spaceID,
+                        threadID: entry.threadID ?? task.threadID,
+                        eventType: "chat.message",
+                        payload: payload,
+                        idempotencyKey: "swift.chat.\(entry.id.uuidString.lowercased())"
+                    )
+                    mergeCollaborationEvent(event)
+                }
+                _ = try await collaborationClient.heartbeatPresence(spaceID: spaceID)
+                collaborationConnectionState = .connected
+                collaborationError = nil
+                startCollaborationStream(spaceID: spaceID, client: collaborationClient)
+                startCollaborationHeartbeat(spaceID: spaceID, client: collaborationClient)
+            } catch {
+                collaborationConnectionState = .offline
+                collaborationError = error.localizedDescription
+            }
+        }
+    }
+
     func reload() {
         guard let service else { return }
         var reloadStage = "tasks"
@@ -1555,6 +1825,10 @@ final class AppStore: ObservableObject {
                 selectedEndpointID: endpointID
             )
             reload()
+            // Publish the durable user message immediately; the later
+            // dispatch completion publishes any Agent reply with the same
+            // idempotency contract.
+            publishWorkspaceChat(taskID: taskID)
             guard let route = prepared.route else {
                 transientMessage = "Message saved automatically."
                 return
@@ -1657,9 +1931,9 @@ final class AppStore: ObservableObject {
         provider: ConversationProvider
     ) {
         guard let service else { return }
-        let runID = chatEntries.first {
-            $0.id == entryID
-        }?.runID
+        let entry = chatEntries.first { $0.id == entryID }
+        let runID = entry?.runID
+        let taskID = entry?.taskID
         if let runID {
             dispatchingRunIDs.insert(runID)
             Task { [weak self] in
@@ -1711,6 +1985,9 @@ final class AppStore: ObservableObject {
                     dispatchingRunIDs.remove(runID)
                 }
                 reload()
+                if let taskID {
+                    publishWorkspaceChat(taskID: taskID)
+                }
                 switch result {
                 case .success(let status):
                     if status == "completed" || status == "success" {
@@ -1885,6 +2162,7 @@ final class AppStore: ObservableObject {
                 guard let self else { return }
                 dispatchingRunIDs.remove(runID)
                 reload()
+                publishWorkspaceChat(taskID: entry.taskID)
                 switch result {
                 case .success(let status):
                     if status == "completed" || status == "success" {
