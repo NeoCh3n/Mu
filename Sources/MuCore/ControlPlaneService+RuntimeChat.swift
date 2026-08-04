@@ -64,6 +64,8 @@ extension ControlPlaneService {
                     prompt: prompt,
                     clientUserMessageID:
                         state.entry.id.uuidString,
+                    model: state.entry.requestedModel
+                        ?? state.endpoint.configuredDefaultModel,
                     onTurnStarted: {
                         [weak self] threadID, turnID in
                         try self?.markManagedContinuationStarted(
@@ -94,6 +96,8 @@ extension ControlPlaneService {
                         promptPreferences.codexAdditionalInstructions,
                     clientUserMessageID:
                         state.entry.id.uuidString,
+                    model: state.entry.requestedModel
+                        ?? state.endpoint.configuredDefaultModel,
                     onThreadStarted: {
                         [weak self] nativeSessionID in
                         try self?.markManagedContinuationSessionReplaced(
@@ -205,6 +209,8 @@ extension ControlPlaneService {
                 promptOverride: prompt,
                 additionalSystemPrompt:
                     promptPreferences.claudeCodeAdditionalInstructions,
+                model: state.entry.requestedModel
+                    ?? state.endpoint.configuredDefaultModel,
                 onSessionStarted: {
                     [weak self] nativeSessionID in
                     try self?.markManagedContinuationStarted(

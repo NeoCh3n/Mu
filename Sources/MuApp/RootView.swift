@@ -24,7 +24,7 @@ struct RootView: View {
         }
         .navigationSplitViewStyle(.balanced)
         .sheet(isPresented: $store.isCreatingTask) {
-            NewTaskSheet()
+            NewThreadSheet()
                 .environmentObject(store)
         }
         .sheet(isPresented: $store.isCreatingAgent) {
@@ -33,6 +33,10 @@ struct RootView: View {
         }
         .sheet(isPresented: $store.isRegisteringRuntime) {
             RegisterRuntimeSheet(provider: store.runtimeSetupProvider)
+                .environmentObject(store)
+        }
+        .sheet(item: $store.runtimeConfigurationEndpoint) { endpoint in
+            RuntimeSettingsSheet(endpoint: endpoint)
                 .environmentObject(store)
         }
         .sheet(item: $store.checkpointForHandoff) { checkpoint in
@@ -417,13 +421,17 @@ struct DashboardView: View {
                 HStack(alignment: .top, spacing: 16) {
                     Panel(
                         title: muText(store.interfaceLanguage, "Active work", "当前工作"),
-                        subtitle: muText(store.interfaceLanguage, "Tasks, ownership, and runtime state", "任务、负责人和运行时状态")
+                        subtitle: muText(
+                            store.interfaceLanguage,
+                            "Threads, ownership, and runtime state",
+                            "Thread、负责人和运行时状态"
+                        )
                     ) {
                         if activeTasks.isEmpty {
                             compactEmpty(
                                 symbol: "checklist",
-                                title: muText(store.interfaceLanguage, "No active Tasks", "没有活跃任务"),
-                                message: muText(store.interfaceLanguage, "Create a Task inside a Project to begin a portable execution record.", "在 Project 中创建任务，开始一条可移植的执行记录。")
+                                title: muText(store.interfaceLanguage, "No active Threads", "没有活跃 Thread"),
+                                message: muText(store.interfaceLanguage, "Create a Thread inside a Project to begin a portable execution record.", "在 Project 中创建 Thread，开始一条可移植的执行记录。")
                             )
                         } else {
                             VStack(spacing: 0) {

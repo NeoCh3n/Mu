@@ -4,6 +4,7 @@ import type { RouteContext } from './index.ts'
 
 interface TaskBody {
   readonly projectID?: string
+  readonly workspaceID?: string
   readonly title: string
   readonly objective: string
   readonly repositoryPath: string
@@ -46,6 +47,7 @@ export function registerTasksRoutes(app: FastifyInstance, ctx: RouteContext): vo
     }
     const task = service.createTask({
       projectID: (body.projectID ?? '') as never,
+      workspaceID: (body.workspaceID ?? body.projectID) as never,
       title: body.title.trim(),
       objective: body.objective.trim(),
       repositoryPath: body.repositoryPath,

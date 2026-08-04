@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useParams } from 'react-router'
 import { api, type ContextRecord, type Endpoint, type ExternalConversationCandidate, type LedgerEvent, type RunRecord } from '../api.ts'
+import { useCollaborationSpace, type SpaceSyncBatch } from '../collaboration.ts'
 import { useMuUISettings, useQuery, useSSE } from '../hooks.ts'
 import { statusText, text } from '../i18n.ts'
 import { ErrorBanner } from './ProjectsPage.tsx'
@@ -55,6 +56,7 @@ export function TaskDetailPage() {
 
   const endpoints = endpointData?.endpoints ?? []
   const currentTask = task?.task
+  const sharedRoom = useCollaborationSpace(currentTask?.workspaceID ?? currentTask?.projectID)
   const running = runs?.runs.some((run) => ['starting', 'active'].includes(run.state)) === true
   const latestRun = runs?.runs[0]
   const runnableEndpoints = useMemo(
@@ -328,6 +330,7 @@ export function TaskDetailPage() {
 
         {environmentOpen && <aside className="space-y-3">
           <RuntimeCard endpoint={effectiveEndpoint} latestRun={latestRun} />
+          <SharedRoomCard batch={sharedRoom.batch} connected={sharedRoom.connected} taskID={id} language={settings.language} />
           <ContextPanel records={contexts?.records ?? []} selectedIDs={selectedContextIDs} onToggle={(record) => void acceptContext(record)} />
           <div className="rounded-xl border border-zinc-800 bg-zinc-900/70 p-4">
             <div className="flex items-center justify-between">
@@ -514,6 +517,17 @@ function RuntimeCard({ endpoint, latestRun }: { endpoint?: Endpoint; latestRun?:
       )}
     </div>
   )
+}
+
+function SharedRoomCard({ batch, connected, taskID, language }: { batch: SpaceSyncBatch | undefined; connected: boolean; taskID: string; language: 'en' | 'zh-Hans' }) {
+  const t = (english: string, simplifiedChinese: string) => text(language, english, simplifiedChinese)
+  const messages = (batch?.events ?? []).filter((event) => event.eventType === 'thread.message' && event.payload.taskID === taskID).slice(-8)
+  return <div className="rounded-xl border border-zinc-800 bg-zinc-900/70 p-4">
+    <div className="flex items-center justify-between gap-2"><h2 className="text-sm font-semibold text-zinc-200">{t('Shared room', '共享房间')}</h2><span className={`rounded-full px-1.5 py-0.5 text-[10px] ${connected ? 'bg-emerald-950 text-emerald-300' : 'bg-zinc-800 text-zinc-500'}`}>{connected ? t('Live', '实时') : t('Offline', '离线')}</span></div>
+    <p className="mt-1 text-[11px] leading-4 text-zinc-500">{t('People and Agents in this Project see the same ordered thread events.', '这个 Project 中的人和 Agent 会看到同一组有序 thread 事件。')}</p>
+    <div className="mt-2 flex flex-wrap gap-1.5">{batch?.presence.map((person) => <span key={person.id} className="rounded-full bg-emerald-950/60 px-1.5 py-0.5 text-[10px] text-emerald-200">● {person.displayName}</span>)}</div>
+    <div className="mt-3 space-y-2 border-t border-zinc-800 pt-3">{messages.map((event) => <div key={event.id} className="rounded-lg bg-zinc-950/45 px-2.5 py-2"><div className="text-[10px] text-zinc-500">{event.payload.authorName ?? t('Participant', '参与者')}</div><div className="mt-1 text-[11px] leading-4 text-zinc-300"><MarkdownMessage text={event.payload.text ?? ''} /></div></div>)}{messages.length === 0 && <div className="text-[11px] text-zinc-600">{t('No shared messages for this thread yet.', '这个 thread 还没有共享消息。')}</div>}</div>
+  </div>
 }
 
 function ContextPanel({ records, selectedIDs, onToggle }: { records: ContextRecord[]; selectedIDs: string[]; onToggle: (record: ContextRecord) => void }) {

@@ -96,6 +96,16 @@ public enum PermissionModel: String, Codable, CaseIterable, Sendable {
     case allOrNothing = "all_or_nothing"
     case none
     case unknown
+
+    public var displayName: String {
+        switch self {
+        case .fineGrained: "Fine-grained"
+        case .promptGate: "Prompt gate"
+        case .allOrNothing: "All or nothing"
+        case .none: "No permissions"
+        case .unknown: "Runtime-defined"
+        }
+    }
 }
 
 public enum RuntimeCapability: String, Codable, CaseIterable, Hashable, Sendable {
@@ -213,6 +223,11 @@ public enum ChatDeliveryState: String, Codable, Sendable {
 public struct ChatEntry: Identifiable, Codable, Hashable, Sendable {
     public var id: UUID
     public var taskID: UUID
+    /// Optional collaboration references keep legacy Task-backed chat JSON
+    /// readable while allowing a Thread to become the durable UI scope.
+    public var spaceID: UUID?
+    public var threadID: UUID?
+    public var workItemID: UUID?
     public var agentIdentityID: UUID?
     public var targetAgentIdentityID: UUID?
     public var targetEndpointID: UUID?
@@ -220,6 +235,9 @@ public struct ChatEntry: Identifiable, Codable, Hashable, Sendable {
     public var runtimeSessionBindingID: UUID?
     public var nativeMessageIndex: Int?
     public var nativeMessageIndexLowerBound: Int?
+    /// Optional per-message model override chosen in the Project composer.
+    /// The endpoint default remains authoritative when this is nil.
+    public var requestedModel: String?
     public var deliveryState: ChatDeliveryState?
     public var routedText: String?
     public var contextFreeRoutedText: String?
@@ -233,6 +251,9 @@ public struct ChatEntry: Identifiable, Codable, Hashable, Sendable {
     public init(
         id: UUID = UUID(),
         taskID: UUID,
+        spaceID: UUID? = nil,
+        threadID: UUID? = nil,
+        workItemID: UUID? = nil,
         agentIdentityID: UUID? = nil,
         targetAgentIdentityID: UUID? = nil,
         targetEndpointID: UUID? = nil,
@@ -240,6 +261,7 @@ public struct ChatEntry: Identifiable, Codable, Hashable, Sendable {
         runtimeSessionBindingID: UUID? = nil,
         nativeMessageIndex: Int? = nil,
         nativeMessageIndexLowerBound: Int? = nil,
+        requestedModel: String? = nil,
         deliveryState: ChatDeliveryState? = nil,
         routedText: String? = nil,
         contextFreeRoutedText: String? = nil,
@@ -252,6 +274,9 @@ public struct ChatEntry: Identifiable, Codable, Hashable, Sendable {
     ) {
         self.id = id
         self.taskID = taskID
+        self.spaceID = spaceID
+        self.threadID = threadID
+        self.workItemID = workItemID
         self.agentIdentityID = agentIdentityID
         self.targetAgentIdentityID = targetAgentIdentityID
         self.targetEndpointID = targetEndpointID
@@ -259,6 +284,7 @@ public struct ChatEntry: Identifiable, Codable, Hashable, Sendable {
         self.runtimeSessionBindingID = runtimeSessionBindingID
         self.nativeMessageIndex = nativeMessageIndex
         self.nativeMessageIndexLowerBound = nativeMessageIndexLowerBound
+        self.requestedModel = requestedModel
         self.deliveryState = deliveryState
         self.routedText = routedText
         self.contextFreeRoutedText = contextFreeRoutedText
@@ -298,6 +324,9 @@ public enum RuntimeSessionState: String, Codable, CaseIterable, Sendable {
 public struct RuntimeSessionBinding: Identifiable, Codable, Hashable, Sendable {
     public var id: UUID
     public var taskID: UUID
+    public var spaceID: UUID?
+    public var threadID: UUID?
+    public var workItemID: UUID?
     public var projectID: UUID?
     public var workspaceID: UUID?
     public var actorID: UUID?
@@ -317,12 +346,16 @@ public struct RuntimeSessionBinding: Identifiable, Codable, Hashable, Sendable {
     public var lastSyncedMessageCount: Int
     public var lastActivitySummary: String
     public var lastError: String?
+    public var version: Int64?
     public var createdAt: Date
     public var updatedAt: Date
 
     public init(
         id: UUID = UUID(),
         taskID: UUID,
+        spaceID: UUID? = nil,
+        threadID: UUID? = nil,
+        workItemID: UUID? = nil,
         projectID: UUID? = nil,
         workspaceID: UUID? = nil,
         actorID: UUID? = nil,
@@ -342,11 +375,15 @@ public struct RuntimeSessionBinding: Identifiable, Codable, Hashable, Sendable {
         lastSyncedMessageCount: Int = 0,
         lastActivitySummary: String = "Connecting to the native session.",
         lastError: String? = nil,
+        version: Int64? = 1,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
         self.id = id
         self.taskID = taskID
+        self.spaceID = spaceID
+        self.threadID = threadID
+        self.workItemID = workItemID
         self.projectID = projectID
         self.workspaceID = workspaceID
         self.actorID = actorID
@@ -366,6 +403,7 @@ public struct RuntimeSessionBinding: Identifiable, Codable, Hashable, Sendable {
         self.lastSyncedMessageCount = lastSyncedMessageCount
         self.lastActivitySummary = lastActivitySummary
         self.lastError = lastError
+        self.version = version
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -483,6 +521,11 @@ public struct RuntimeArtifactRecord: Identifiable, Codable, Hashable, Sendable {
 
 public struct TaskRecord: Identifiable, Codable, Hashable, Sendable {
     public var id: UUID
+    /// Collaboration references are optional during the migration from the
+    /// legacy Task-centric local model.
+    public var spaceID: UUID?
+    public var threadID: UUID?
+    public var workItemID: UUID?
     public var projectID: UUID?
     public var workspaceID: UUID?
     public var requestedByActorID: UUID?
@@ -497,11 +540,15 @@ public struct TaskRecord: Identifiable, Codable, Hashable, Sendable {
     public var currentEndpointID: UUID?
     public var currentRunID: UUID?
     public var assignedAgentIdentityID: UUID?
+    public var version: Int64?
     public var createdAt: Date
     public var updatedAt: Date
 
     public init(
         id: UUID = UUID(),
+        spaceID: UUID? = nil,
+        threadID: UUID? = nil,
+        workItemID: UUID? = nil,
         projectID: UUID? = nil,
         workspaceID: UUID? = nil,
         requestedByActorID: UUID? = nil,
@@ -516,10 +563,14 @@ public struct TaskRecord: Identifiable, Codable, Hashable, Sendable {
         currentEndpointID: UUID? = nil,
         currentRunID: UUID? = nil,
         assignedAgentIdentityID: UUID? = nil,
+        version: Int64? = 1,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
         self.id = id
+        self.spaceID = spaceID
+        self.threadID = threadID
+        self.workItemID = workItemID
         self.projectID = projectID
         self.workspaceID = workspaceID
         self.requestedByActorID = requestedByActorID
@@ -534,6 +585,7 @@ public struct TaskRecord: Identifiable, Codable, Hashable, Sendable {
         self.currentEndpointID = currentEndpointID
         self.currentRunID = currentRunID
         self.assignedAgentIdentityID = assignedAgentIdentityID
+        self.version = version
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -542,6 +594,9 @@ public struct TaskRecord: Identifiable, Codable, Hashable, Sendable {
 public struct RunRecord: Identifiable, Codable, Hashable, Sendable {
     public var id: UUID
     public var taskID: UUID
+    public var spaceID: UUID?
+    public var threadID: UUID?
+    public var workItemID: UUID?
     public var projectID: UUID?
     public var workspaceID: UUID?
     public var actorID: UUID?
@@ -557,12 +612,16 @@ public struct RunRecord: Identifiable, Codable, Hashable, Sendable {
     public var nativeTurnID: String?
     public var nativeOutput: String?
     public var agentIdentityID: UUID?
+    public var version: Int64?
     public var createdAt: Date
     public var updatedAt: Date
 
     public init(
         id: UUID = UUID(),
         taskID: UUID,
+        spaceID: UUID? = nil,
+        threadID: UUID? = nil,
+        workItemID: UUID? = nil,
         projectID: UUID? = nil,
         workspaceID: UUID? = nil,
         actorID: UUID? = nil,
@@ -578,11 +637,15 @@ public struct RunRecord: Identifiable, Codable, Hashable, Sendable {
         nativeTurnID: String? = nil,
         nativeOutput: String? = nil,
         agentIdentityID: UUID? = nil,
+        version: Int64? = 1,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
         self.id = id
         self.taskID = taskID
+        self.spaceID = spaceID
+        self.threadID = threadID
+        self.workItemID = workItemID
         self.projectID = projectID
         self.workspaceID = workspaceID
         self.actorID = actorID
@@ -598,6 +661,7 @@ public struct RunRecord: Identifiable, Codable, Hashable, Sendable {
         self.nativeTurnID = nativeTurnID
         self.nativeOutput = nativeOutput
         self.agentIdentityID = agentIdentityID
+        self.version = version
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

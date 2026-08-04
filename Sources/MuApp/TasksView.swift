@@ -26,8 +26,8 @@ struct TasksWorkspaceView: View {
             } else {
                 EmptyState(
                     symbol: "checklist",
-                    title: muText(store.interfaceLanguage, "No Task selected", "未选择任务"),
-                    message: muText(store.interfaceLanguage, "Choose a Task inside a Project, or create a new one.", "选择 Project 中的任务，或创建一个新任务。")
+                    title: muText(store.interfaceLanguage, "No Thread selected", "未选择 Thread"),
+                    message: muText(store.interfaceLanguage, "Choose a Thread inside a Project, or create a new one.", "选择 Project 中的 Thread，或创建一个新的 Thread。")
                 )
             }
         }
@@ -36,7 +36,7 @@ struct TasksWorkspaceView: View {
                 Button {
                     store.openNewTask()
                 } label: {
-                    Label(muText(store.interfaceLanguage, "New Project", "新建 Project"), systemImage: "plus")
+                    Label(muText(store.interfaceLanguage, "New Thread", "新建 Thread"), systemImage: "plus")
                 }
             }
         }
@@ -133,8 +133,8 @@ struct TasksWorkspaceView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-                .help(muText(store.interfaceLanguage, "New Project", "新建 Project"))
-                .accessibilityLabel(muText(store.interfaceLanguage, "New Project", "新建 Project"))
+                .help(muText(store.interfaceLanguage, "New Thread", "新建 Thread"))
+                .accessibilityLabel(muText(store.interfaceLanguage, "New Thread", "新建 Thread"))
             }
             .padding(18)
 
@@ -166,8 +166,8 @@ struct TasksWorkspaceView: View {
             $0 + $1.taskCount
         }
         let projectLabel = projects.count == 1 ? "Project" : "Projects"
-        let taskLabel = visibleTaskCount == 1 ? "Task" : "Tasks"
-        return "\(projects.count) \(projectLabel) · \(visibleTaskCount) \(taskLabel)"
+        let threadLabel = visibleTaskCount == 1 ? "Thread" : "Threads"
+        return "\(projects.count) \(projectLabel) · \(visibleTaskCount) \(threadLabel)"
     }
 
     @ViewBuilder
@@ -235,7 +235,7 @@ struct TasksWorkspaceView: View {
                 .help(project.path)
                 .accessibilityLabel(
                     "\(project.name), \(project.taskCount) "
-                        + (project.taskCount == 1 ? "Task" : "Tasks")
+                        + (project.taskCount == 1 ? "Thread" : "Threads")
                 )
                 .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
                 .accessibilityHint(
@@ -254,8 +254,8 @@ struct TasksWorkspaceView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("New Task in \(project.name)")
-                .accessibilityLabel("New Task in \(project.name)")
+                .help("New Thread in \(project.name)")
+                .accessibilityLabel("New Thread in \(project.name)")
 
                 Menu {
                     Button {
@@ -305,7 +305,7 @@ struct TasksWorkspaceView: View {
                                 + "\(store.agent(id: task.assignedAgentIdentityID)?.displayName ?? "Unassigned")"
                         )
                         .accessibilityHint(
-                            "Open this Task in \(project.name)"
+                            "Open this Thread in \(project.name)"
                         )
                         .accessibilityAddTraits(
                             store.selectedTaskID == task.id

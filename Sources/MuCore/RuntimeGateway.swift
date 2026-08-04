@@ -214,6 +214,108 @@ public struct RuntimeGatewayManifest:
     }
 }
 
+/// The controls Mu may expose in the Thread composer for one concrete Runtime
+/// endpoint. This is intentionally derived from the probed Gateway manifest
+/// and endpoint configuration; the UI must not show controls that the host
+/// cannot actually honor.
+public struct RuntimeComposerCapabilities: Hashable, Sendable {
+    public var canSubmit: Bool
+    public var canObserve: Bool
+    public var canInterrupt: Bool
+    public var canResolveApproval: Bool
+    public var canSelectContext: Bool
+    public var modelOptions: [String]
+    public var permissionOptions: [String]
+    public var permissionModel: PermissionModel
+
+    public var canChooseModel: Bool {
+        modelOptions.count > 1
+    }
+
+    public var canChoosePermission: Bool {
+        permissionOptions.count > 1
+    }
+
+    public init(
+        canSubmit: Bool,
+        canObserve: Bool,
+        canInterrupt: Bool,
+        canResolveApproval: Bool,
+        canSelectContext: Bool,
+        modelOptions: [String] = [],
+        permissionOptions: [String] = [],
+        permissionModel: PermissionModel
+    ) {
+        self.canSubmit = canSubmit
+        self.canObserve = canObserve
+        self.canInterrupt = canInterrupt
+        self.canResolveApproval = canResolveApproval
+        self.canSelectContext = canSelectContext
+        self.modelOptions = modelOptions
+        self.permissionOptions = permissionOptions
+        self.permissionModel = permissionModel
+    }
+
+    public static func forEndpoint(
+        _ endpoint: RuntimeEndpoint,
+        hasAuthorizedContext: Bool
+    ) -> RuntimeComposerCapabilities {
+        let manifest = endpoint.gatewayManifest
+        return RuntimeComposerCapabilities(
+            canSubmit: manifest.supports(
+                .submitInput,
+                endpointIsActive: endpoint.status == .active
+            ),
+            canObserve: manifest.supports(
+                .observeEvents,
+                endpointIsActive: endpoint.status == .active
+            ),
+            canInterrupt: manifest.supports(
+                .interrupt,
+                endpointIsActive: endpoint.status == .active
+            ),
+            canResolveApproval: manifest.supports(
+                .resolveApproval,
+                endpointIsActive: endpoint.status == .active
+            ),
+            canSelectContext: hasAuthorizedContext
+                && manifest.supports(
+                    .searchContext,
+                    endpointIsActive: endpoint.status == .active
+                )
+                && manifest.supports(
+                    .getContextRecord,
+                    endpointIsActive: endpoint.status == .active
+                ),
+            modelOptions: Self.options(
+                from: endpoint.nativeConfiguration,
+                key: "model_options"
+            ),
+            permissionOptions: Self.options(
+                from: endpoint.nativeConfiguration,
+                key: "permission_options"
+            ),
+            permissionModel: endpoint.permissionModel
+        )
+    }
+
+    private static func options(
+        from configuration: [String: String]?,
+        key: String
+    ) -> [String] {
+        guard let raw = configuration?[key] else { return [] }
+        var seen = Set<String>()
+        return raw
+            .split(separator: ",")
+            .map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            .filter {
+                !$0.isEmpty && seen.insert($0).inserted
+            }
+    }
+}
+
 /// Persisted probe snapshot. The endpoint UUID is the registration identity so
 /// a manifest survives app restart without inventing a second Runtime.
 public struct RuntimeAdapterRegistration:

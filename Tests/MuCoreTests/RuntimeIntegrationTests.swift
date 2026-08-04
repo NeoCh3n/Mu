@@ -78,6 +78,7 @@ struct RuntimeIntegrationTests {
             agent: nil,
             clientUserMessageID: clientUserMessageID,
             timeout: 5,
+            model: "gpt-codex-configured",
             onThreadStarted: { threadID in
                 stagedCallbacks.append("thread:\(threadID)")
             },
@@ -103,6 +104,7 @@ struct RuntimeIntegrationTests {
         let turnParams = try #require(turnRequest["params"] as? [String: Any])
         #expect(turnParams["clientUserMessageId"] as? String == clientUserMessageID)
         #expect(turnParams["threadId"] as? String == "thread-staged")
+        #expect(turnParams["model"] as? String == "gpt-codex-configured")
         let sandboxPolicy = try #require(
             turnParams["sandboxPolicy"] as? [String: Any]
         )

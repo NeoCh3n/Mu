@@ -199,7 +199,8 @@ struct RuntimeGatewayTests {
             contextPack: contextPack,
             sessionID: initialSessionID,
             resumeSessionID: nil,
-            promptOverride: "EXACT_PROMPT"
+            promptOverride: "EXACT_PROMPT",
+            model: "claude-sonnet-configured"
         )
         #expect(initial.contains("--print"))
         #expect(initial.contains("stream-json"))
@@ -208,6 +209,7 @@ struct RuntimeGatewayTests {
         #expect(initial.contains("plan"))
         #expect(initial.contains("Read,Glob,Grep"))
         #expect(initial.contains("Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch"))
+        #expect(argumentValue("--model", in: initial) == "claude-sonnet-configured")
         #expect(argumentValue("--session-id", in: initial) == initialSessionID)
         #expect(argumentValue("--resume", in: initial) == nil)
         #expect(initial.last == "EXACT_PROMPT")
@@ -223,6 +225,46 @@ struct RuntimeGatewayTests {
         #expect(argumentValue("--resume", in: resumed) == resumedSessionID)
         #expect(argumentValue("--session-id", in: resumed) == nil)
         #expect(resumed.last == "RESUME_PROMPT")
+    }
+
+    @Test
+    func runtimeModelAndPermissionSettingsPersistWithoutChangingEndpointIdentity() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let service = try ControlPlaneService(dataDirectory: root)
+        let endpoint = try service.registerManualEndpoint(
+            displayName: "Configured Claude",
+            runtimeTypeID: ControlPlaneService.claudeCodeRuntimeTypeID,
+            location: .local,
+            provenance: .vendorCLI,
+            permissionModel: .promptGate,
+            executablePath: "/opt/homebrew/bin/claude",
+            surfaceKind: .terminalCLI,
+            instanceLabel: "Claude · Terminal 4",
+            terminalIdentifier: "ttys004",
+            notes: "test",
+            defaultModel: "claude-sonnet-configured",
+            modelOptions: ["claude-opus", "claude-sonnet-configured", "claude-opus"]
+        )
+
+        #expect(endpoint.configuredDefaultModel == "claude-sonnet-configured")
+        #expect(endpoint.configuredModelOptions == ["claude-opus", "claude-sonnet-configured"])
+
+        let updated = try service.updateRuntimeSettings(
+            endpointID: endpoint.id,
+            defaultModel: "claude-opus",
+            modelOptions: ["claude-sonnet-configured", "claude-opus"],
+            permissionModel: .fineGrained
+        )
+        #expect(updated.id == endpoint.id)
+        #expect(updated.resolvedInstanceIdentity.stableInstanceKey == endpoint.resolvedInstanceIdentity.stableInstanceKey)
+        #expect(updated.configuredDefaultModel == "claude-opus")
+        #expect(updated.configuredModelOptions == ["claude-sonnet-configured", "claude-opus"])
+        #expect(updated.permissionModel == .fineGrained)
+
+        let restored = try #require(try service.store.fetchRegisteredEndpoint(id: endpoint.id))
+        #expect(restored.configuredDefaultModel == "claude-opus")
+        #expect(restored.permissionModel == .fineGrained)
     }
 
     @Test

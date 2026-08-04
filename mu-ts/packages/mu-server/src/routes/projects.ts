@@ -25,6 +25,15 @@ interface EndpointBody {
   readonly executablePath?: string
   readonly surfaceKind?: string
   readonly instanceLabel?: string
+  readonly permissionModel?: string
+  readonly defaultModel?: string
+  readonly modelOptions?: readonly string[]
+}
+
+interface EndpointSettingsBody {
+  readonly permissionModel?: string
+  readonly defaultModel?: string
+  readonly modelOptions?: readonly string[]
 }
 
 interface ProjectUpdateBody {
@@ -32,7 +41,7 @@ interface ProjectUpdateBody {
 }
 
 export function registerProjectsRoutes(app: FastifyInstance, ctx: RouteContext): void {
-  const { service } = ctx
+  const { service, collaboration } = ctx
 
   app.get('/projects', async () => ({ projects: service.listProjects() }))
 
@@ -46,6 +55,12 @@ export function registerProjectsRoutes(app: FastifyInstance, ctx: RouteContext):
       repositoryPath: body.repositoryPath,
       ownerPrincipalID: (body.ownerPrincipalID ?? 'local-user') as never,
     })
+    collaboration.ensureSpace({
+      id: project.id,
+      displayName: project.displayName,
+      description: project.repositoryPath,
+      createdByActorID: project.ownerPrincipalID,
+    })
     return { project }
   })
 
@@ -54,11 +69,15 @@ export function registerProjectsRoutes(app: FastifyInstance, ctx: RouteContext):
     if (typeof displayName !== 'string' || displayName.trim() === '') {
       return reply.status(400).send({ error: 'bad_request', message: 'displayName is required.' })
     }
-    return { project: service.renameProject(request.params.id as never, displayName) }
+    const project = service.renameProject(request.params.id as never, displayName)
+    collaboration.renameSpace(project.id, project.displayName)
+    return { project }
   })
 
   app.delete('/projects/:id', async (request: FastifyRequest<{ Params: { id: string } }>) => {
-    return { project: service.removeProject(request.params.id as never) }
+    const project = service.removeProject(request.params.id as never)
+    collaboration.archiveSpace(project.id)
+    return { project }
   })
 
   app.get('/agents', async () => ({ agents: service.listAgents() }))
@@ -111,9 +130,25 @@ export function registerProjectsRoutes(app: FastifyInstance, ctx: RouteContext):
         ...(body.instanceLabel === undefined ? {} : { instanceLabel: body.instanceLabel.trim() }),
         ...(body.executablePath === undefined ? {} : { executablePath: body.executablePath.trim() }),
       },
+      permissionModel: (body.permissionModel as never) ?? 'fine_grained',
+      defaultModel: body.defaultModel,
+      modelOptions: body.modelOptions,
       status: body.runtimeTypeID === 'pi/coding-agent' || body.runtimeTypeID === 'opencode/cli'
         ? 'offline'
         : undefined,
+    })
+    return { endpoint }
+  })
+
+  app.patch('/endpoints/:id', async (request: FastifyRequest<{ Params: { id: string }; Body: EndpointSettingsBody }>, reply: FastifyReply) => {
+    const body = request.body ?? {}
+    if (typeof body.permissionModel !== 'string' || body.permissionModel.trim() === '') {
+      return reply.status(400).send({ error: 'bad_request', message: 'permissionModel is required.' })
+    }
+    const endpoint = service.updateEndpointSettings(request.params.id as never, {
+      permissionModel: body.permissionModel as never,
+      defaultModel: body.defaultModel,
+      modelOptions: body.modelOptions,
     })
     return { endpoint }
   })

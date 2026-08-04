@@ -176,10 +176,18 @@ export interface ControlPlaneService {
     instanceIdentity?: Partial<AgentRuntimeInstanceIdentity>
     /** Optional user-supplied local configuration, kept opaque to the core. */
     nativeConfiguration?: Readonly<Record<string, string>>
+    permissionModel?: RuntimeEndpoint['permissionModel']
+    defaultModel?: string
+    modelOptions?: readonly string[]
     /** Discovery state override for hosts that still need an adapter. */
     status?: RuntimeEndpoint['status']
   }): RuntimeEndpoint
   listEndpoints(): RuntimeEndpoint[]
+  updateEndpointSettings(endpointID: UUID, params: {
+    permissionModel: RuntimeEndpoint['permissionModel']
+    defaultModel?: string
+    modelOptions?: readonly string[]
+  }): RuntimeEndpoint
   removeEndpoint(endpointID: UUID): RuntimeEndpoint
   removeDuplicateDiscoveredEndpoints(): UUID[]
   // Tasks
@@ -455,6 +463,16 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
 
     registerEndpoint(params) {
       const endpointID = uuid()
+      const defaultModel = params.defaultModel?.trim() ?? ''
+      const configuredModels = normalizeModelOptions(
+        params.modelOptions ?? [],
+        defaultModel,
+      )
+      const nativeConfiguration = {
+        ...(params.nativeConfiguration ?? {}),
+        ...(defaultModel === '' ? {} : { default_model: defaultModel }),
+        ...(configuredModels.length === 0 ? {} : { model_options: configuredModels.join(',') }),
+      }
       const endpoint = createRuntimeEndpoint({
         id: endpointID,
         runtimeTypeID: params.runtimeTypeID,
@@ -463,15 +481,15 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
         runtimeVersion: params.runtimeVersion,
         location: params.location,
         provenance: 'vendor_cli',
-        permissionModel: 'fine_grained',
+        permissionModel: params.permissionModel ?? 'fine_grained',
         capabilities: new Set(['start', 'continue', 'cancel', 'stream_events']),
         status: params.status ?? 'discovered',
         guaranteeNote: 'Registered by the control plane.',
         lastProbedAt: now(),
-        nativeConfiguration: params.nativeConfiguration,
+        nativeConfiguration,
         instanceIdentity: defaultInstanceIdentity({
           ...params,
-          nativeConfiguration: params.nativeConfiguration,
+          nativeConfiguration,
         }, endpointID),
       })
       upsertEndpoint(store, endpoint)
@@ -513,6 +531,38 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
 
     listEndpoints() {
       return fetchRegisteredEndpoints(store)
+    },
+
+    updateEndpointSettings(endpointID, params) {
+      const endpoint = fetchRegisteredEndpoint(store, endpointID)
+      if (endpoint === undefined || !fetchRegisteredEndpoints(store).some((candidate) => candidate.id === endpointID)) {
+        throw MuError.recordNotFound(`Runtime endpoint ${endpointID} was not found.`)
+      }
+      const defaultModel = params.defaultModel?.trim() ?? ''
+      const modelOptions = normalizeModelOptions(params.modelOptions ?? [], defaultModel)
+      const nativeConfiguration = { ...(endpoint.nativeConfiguration ?? {}) }
+      if (defaultModel === '') delete nativeConfiguration.default_model
+      else nativeConfiguration.default_model = defaultModel
+      if (modelOptions.length === 0) delete nativeConfiguration.model_options
+      else nativeConfiguration.model_options = modelOptions.join(',')
+      const updated = createRuntimeEndpoint({
+        ...endpoint,
+        permissionModel: params.permissionModel,
+        nativeConfiguration,
+      })
+      upsertEndpoint(store, updated)
+      appendLedger(store, {
+        type: 'endpoint.settings_updated',
+        summary: `Updated runtime settings for "${endpoint.displayName}".`,
+        occurredAt: now(),
+        payload: {
+          endpointID,
+          defaultModel,
+          modelOptions: modelOptions.join(','),
+          permissionModel: params.permissionModel,
+        },
+      })
+      return updated
     },
 
     removeEndpoint(endpointID) {
@@ -1521,6 +1571,15 @@ export function createControlPlaneService(deps: ControlPlaneDependencies): Contr
 // ---------------------------------------------------------------------------
 // Small local helpers
 // ---------------------------------------------------------------------------
+
+function normalizeModelOptions(values: readonly string[], defaultModel?: string): string[] {
+  const normalized = values
+    .map((value) => value.trim())
+    .filter((value, index, all) => value !== '' && all.indexOf(value) === index)
+  const fallback = defaultModel?.trim() ?? ''
+  if (fallback !== '' && !normalized.includes(fallback)) normalized.unshift(fallback)
+  return normalized
+}
 
 function isPlaceholderTaskTitle(title: string): boolean {
   return ['new task', 'untitled task', 'new workspace task'].includes(title.trim().toLowerCase())

@@ -67,6 +67,35 @@ public enum RuntimeIdentityConfigurationKey {
     public static let terminalIdentifier = "identity.terminal_identifier"
     public static let workspacePath = "identity.workspace_path"
     public static let nativeSource = "identity.native_source"
+    /// The model Mu should request when a Task does not override it.
+    /// Stored as configuration rather than a schema field so legacy endpoint
+    /// records remain decodable and adapters can opt in independently.
+    public static let defaultModel = "default_model"
+    /// Comma-separated model identifiers exposed by the Runtime host.
+    public static let modelOptions = "model_options"
+    public static let permissionModelSource = "permission_model_source"
+}
+
+public extension RuntimeEndpoint {
+    /// A user-selected model for this endpoint, if one was persisted.
+    var configuredDefaultModel: String? {
+        guard let value = nativeConfiguration?[RuntimeIdentityConfigurationKey.defaultModel]
+            else { return nil }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    /// Model identifiers configured for the endpoint, de-duplicated while
+    /// preserving the order in which the user entered them.
+    var configuredModelOptions: [String] {
+        guard let raw = nativeConfiguration?[RuntimeIdentityConfigurationKey.modelOptions]
+            else { return [] }
+        var seen = Set<String>()
+        return raw
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
 }
 
 /// Portable, user-facing identity for one Agent runtime instance or one

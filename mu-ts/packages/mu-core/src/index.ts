@@ -1,4 +1,5 @@
 export * from './types.ts'
+export * from './collaboration.ts'
 export * from './models.ts'
 export * from './identity.ts'
 export * from './hashing.ts'

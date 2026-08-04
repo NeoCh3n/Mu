@@ -231,6 +231,8 @@ extension ControlPlaneService {
                 promptOverride: initialPrompt,
                 additionalSystemPrompt:
                     promptPreferences.claudeCodeAdditionalInstructions,
+                model: workspaceEntry?.requestedModel
+                    ?? endpoint.configuredDefaultModel,
                 onSessionStarted: {
                     [weak self] nativeSessionID in
                     guard let self else { return }

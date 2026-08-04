@@ -2,7 +2,7 @@ import AppKit
 import MuCore
 import SwiftUI
 
-struct NewTaskSheet: View {
+struct NewThreadSheet: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
     @State private var draft = CreateTaskDraft()
@@ -35,11 +35,11 @@ struct NewTaskSheet: View {
         VStack(spacing: 0) {
             sheetHeader(
                 title: isAddingTaskToExistingProject
-                    ? "New Task in \(existingProjectName ?? "Project")"
+                    ? "New Thread in \(existingProjectName ?? "Project")"
                     : "Import folder as a Project",
                 subtitle: isAddingTaskToExistingProject
-                    ? "Start another Task in this Project workspace."
-                    : "Choose a Project folder and create its first Task.",
+                    ? "Start another Thread in this Project workspace."
+                    : "Choose a Project folder and create its first Thread.",
                 symbol: isAddingTaskToExistingProject
                     ? "plus.bubble"
                     : "folder.badge.plus"
@@ -88,7 +88,7 @@ struct NewTaskSheet: View {
 
                             Label(
                                 isAddingTaskToExistingProject
-                                    ? "This Task shares the Project folder, files, and related Agent history."
+                                    ? "This Thread shares the Project folder, files, and related Agent history."
                                     : "This exact folder becomes the Project and is used to match history and native sessions.",
                                 systemImage: "scope"
                             )
@@ -127,10 +127,10 @@ struct NewTaskSheet: View {
 
                     fieldGroup(
                         isAddingTaskToExistingProject
-                            ? "TASK"
-                            : "FIRST TASK"
+                            ? "THREAD"
+                            : "FIRST THREAD"
                     ) {
-                        TextField("Task title", text: $draft.title)
+                        TextField("Thread title", text: $draft.title)
                             .textFieldStyle(.roundedBorder)
                     }
                     fieldGroup("OBJECTIVE") {
@@ -280,17 +280,17 @@ struct NewTaskSheet: View {
     private var createButtonTitle: String {
         if isAddingTaskToExistingProject {
             return selectedHistoryProviders.isEmpty
-                ? "Create Task"
-                : "Create Task & find history"
+                ? "Create Thread"
+                : "Create Thread & find history"
         }
         return selectedHistoryProviders.isEmpty
-            ? "Create Project & Task"
+            ? "Create Project & Thread"
             : "Create & find history"
     }
 
     private func chooseTaskFolder() {
         let panel = NSOpenPanel()
-        panel.title = "Choose the Project folder"
+        panel.title = "Choose the Project folder for this Thread"
         panel.prompt = "Import folder"
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -671,6 +671,23 @@ struct RegisterRuntimeSheet: View {
                         }
                     }
 
+                    HStack(spacing: 14) {
+                        fieldGroup("DEFAULT MODEL · OPTIONAL") {
+                            TextField(
+                                "e.g. claude-sonnet-4-20250514",
+                                text: $draft.defaultModel
+                            )
+                            .textFieldStyle(.roundedBorder)
+                        }
+                        fieldGroup("MODEL OPTIONS · OPTIONAL") {
+                            TextField(
+                                "comma-separated model IDs",
+                                text: $draft.modelOptions
+                            )
+                            .textFieldStyle(.roundedBorder)
+                        }
+                    }
+
                     fieldGroup("EXECUTABLE · OPTIONAL") {
                         HStack {
                             TextField("/path/to/runtime", text: $draft.executablePath)
@@ -746,6 +763,96 @@ struct RegisterRuntimeSheet: View {
         if panel.runModal() == .OK {
             draft.executablePath = panel.url?.path ?? draft.executablePath
         }
+    }
+}
+
+struct RuntimeSettingsSheet: View {
+    @EnvironmentObject private var store: AppStore
+    @Environment(\.dismiss) private var dismiss
+    let endpoint: RuntimeEndpoint
+    @State private var defaultModel: String
+    @State private var modelOptions: String
+    @State private var permissionModel: PermissionModel
+
+    init(endpoint: RuntimeEndpoint) {
+        self.endpoint = endpoint
+        _defaultModel = State(initialValue: endpoint.configuredDefaultModel ?? "")
+        _modelOptions = State(
+            initialValue: endpoint.configuredModelOptions.joined(separator: ", ")
+        )
+        _permissionModel = State(initialValue: endpoint.permissionModel)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            sheetHeader(
+                title: "Configure \(endpoint.muInstanceDisplayName)",
+                subtitle: "Choose the model Mu requests and record this host's permission boundary.",
+                symbol: "slider.horizontal.3"
+            )
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Panel {
+                        VStack(alignment: .leading, spacing: 8) {
+                            EndpointBadge(endpoint: endpoint)
+                            Text(endpoint.guaranteeNote)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    fieldGroup("DEFAULT MODEL") {
+                        TextField("Leave empty for the host default", text: $defaultModel)
+                            .textFieldStyle(.roundedBorder)
+                        Text("Mu passes this identifier to the Runtime when the Task does not choose another model.")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+
+                    fieldGroup("AVAILABLE MODEL IDS · OPTIONAL") {
+                        TextField("model-a, model-b, model-c", text: $modelOptions)
+                            .textFieldStyle(.roundedBorder)
+                        Text("Comma-separated IDs make the model picker visible in Project chat. The default model is added automatically.")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+
+                    fieldGroup("PERMISSION LEVEL") {
+                        Picker("Permission level", selection: $permissionModel) {
+                            ForEach(PermissionModel.allCases, id: \.self) { model in
+                                Text(model.displayName).tag(model)
+                            }
+                        }
+                        .labelsHidden()
+                        Text("This records the Runtime's permission contract. Mu's current Codex and Claude adapters still enforce read-only execution.")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(24)
+            }
+            Divider()
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save settings") {
+                    store.updateRuntimeSettings(
+                        endpointID: endpoint.id,
+                        defaultModel: defaultModel,
+                        modelOptions: modelOptions,
+                        permissionModel: permissionModel
+                    )
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(MuPalette.violet)
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(18)
+        }
+        .frame(width: 700, height: 590)
     }
 }
 

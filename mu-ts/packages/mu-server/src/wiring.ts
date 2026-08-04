@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify'
 import {
   bootstrapLocalControlPlane,
+  CollaborationService,
   createControlPlaneService,
   type ControlPlaneDependencies,
   type ControlPlaneService,
@@ -100,6 +101,7 @@ export interface MuApp {
   readonly service: ControlPlaneService
   readonly store: SQLiteStore
   readonly hub: SSEEventHub
+  readonly collaboration: CollaborationService
   readonly harness: Harness
   /** Closes the store and the Fastify instance. */
   readonly close: () => Promise<void>
@@ -142,6 +144,20 @@ export function buildApp(config: MuAppConfig): MuApp {
     onEvent: (event) => hub.publish('turn', event),
   }
   const service = createControlPlaneService(deps)
+  const collaboration = new CollaborationService(store, {
+    now,
+    onEnvelope: (envelope) => hub.publish(envelope.event, envelope.data),
+  })
+  // Project ids are also deterministic Space ids. Backfill rooms for older
+  // databases so every existing Project immediately has one shared room.
+  for (const project of service.listProjects()) {
+    collaboration.ensureSpace({
+      id: project.id,
+      displayName: project.displayName,
+      description: project.repositoryPath === undefined ? '' : project.repositoryPath,
+      createdByActorID: project.ownerPrincipalID,
+    })
+  }
 
   // Warm long-lived local hosts in the background so a new Project does not
   // pay for app-server process creation and protocol initialization.
@@ -160,7 +176,7 @@ export function buildApp(config: MuAppConfig): MuApp {
 
   const app = Fastify({ logger: config.logger ?? false })
 
-  registerRoutes(app, { service, hub, now })
+  registerRoutes(app, { service, hub, now, collaboration })
 
   app.get('/health', async () => ({
     ok: true,
@@ -177,6 +193,7 @@ export function buildApp(config: MuAppConfig): MuApp {
     service,
     store,
     hub,
+    collaboration,
     harness,
     close: async () => {
       await app.close()

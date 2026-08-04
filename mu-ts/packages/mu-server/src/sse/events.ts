@@ -53,6 +53,7 @@ export function attachSSEStream(
   reply: FastifyReply,
   hub: SSEEventHub,
   heartbeatMs = 25_000,
+  filter?: (envelope: SSEEnvelope) => boolean,
 ): () => void {
   reply.raw.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
@@ -64,6 +65,7 @@ export function attachSSEStream(
 
   const unsubscribe = hub.subscribe((envelope) => {
     if (reply.raw.writableEnded) return
+    if (filter !== undefined && !filter(envelope)) return
     reply.raw.write(formatSSE(envelope))
   })
   const beat = setInterval(() => {
